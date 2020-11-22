@@ -294,4 +294,142 @@ type Matcher struct {
 	counters chan chan uint // Retriever processes waiting for task count reports
 	retrievals chan chan *Retrieval // Retriever processes waiting for task allocations
 	deliveries chan *Retrieval // Retriever processes waiting for task response deliveries
-	running uint32
+	running uint32 // Atomic flag whether a session is live or not
+}
+```
+
+The general flow picture of the matcher, the ellipse on the way represents the goroutine. The rectangle represents the channel. Triangles represent method calls.
+
+![image](picture/matcher_1.png)
+
+1. First, Matcher creates a corresponding number of subMatch based on the number of incoming filters. Each subMatch corresponds to a filter object. Each subMatch will get new results by bitwise matching the results of its own search and the previous search result. If all the bits of the new result are set, the result of the search will be passed to the next one. This is a short-circuit algorithm that implements the summation of the results of all filters. If the previous calculations can't match anything, then there is no need to match the following conditions.
+2. Matcher will start the corresponding number of schedules based on the number of subscripts of the blender's Bloom filter.
+3. subMatch will send the request to the corresponding schedule.
+4. Schedule dispatches the request to the distributor via dist and manages it in the distributor.
+5. Multiple (16) multiplex threads are started, requests are fetched from the distributor, and the request is sent to the bloomRequests queue, which starts accessing the database, fetching the data, and returning it to the multiplex.
+6. Multiplex tells the distributor the answer via the deliveries channel.
+7. Distributor calls the dispatch method of schedule and sends the result to schedule
+8. Schedule returns the result to subMatch.
+9. SubMatch calculates the result and sends it to the next subMatch for processing. If it is the last subMatch, the result is processed and sent to the results channel.
+
+matcher
+
+```go
+filter := New(backend, 0, -1, []common.Address{addr}, [][]common.Hash{{hash1, hash2, hash3, hash4}})
+// The relationship between groups is the relationship between the group and the group.
+// (addr && hash1) ||(addr && hash2)||(addr && hash3)||(addr && hash4)
+```
+
+The constructor, which needs special attention is the input filters parameter. This parameter is a three-dimensional array [][]bloomIndexes === [first dimension][second dimension][3].
+
+```go
+// filter.go is the caller of the matcher
+
+// You can see that no matter how many addresses, there is only one location in the filters.
+// Filters[0] = addresses
+// filters[1] = topics[0] = multi-topic
+// filters[2] = topics[1] = multi-topic
+// filters[n] = topics[n] = multi-topic
+
+// Filter's parameter addresses and topics filter algorithm is (with any address in addresses) and (with any topic in topics[0]) and (with any topic in topics[1]) and (with any topic in topics[n])
+
+// It can be seen that for the filter is the execution and operation of the data in the first dimension, the execution or operation of the data in the second dimension.
+
+// In the NewMatcher method, the specific data of the third dimension is converted into three specified positions of the Bloom filter. So in the filter.go var filters [][][]byte in the Matcher filter becomes [][][3]
+
+func New(backend Backend, begin, end int64, addresses []common.Address, topics [][]common.Hash) *Filter {
+	// Flatten the address and topic filter clauses into a single bloombits filter
+	// system. Since the bloombits are not positional, nil topics are permitted,
+	// which get flattened into a nil byte slice.
+	var filters [][][]byte
+	if len(addresses) > 0 {
+		filter := make([][]byte, len(addresses))
+		for i, address := range addresses {
+			filter[i] = address.Bytes()
+		}
+		filters = append(filters, filter)
+	}
+	for _, topicList := range topics {
+		filter := make([][]byte, len(topicList))
+		for i, topic := range topicList {
+			filter[i] = topic.Bytes()
+		}
+		filters = append(filters, filter)
+	}
+
+// NewMatcher creates a new pipeline for retrieving bloom bit streams and doing
+// address and topic filtering on them. Setting a filter component to `nil` is
+// allowed and will result in that filter rule being skipped (OR 0x11...1).
+func NewMatcher(sectionSize uint64, filters [][][]byte) *Matcher {
+	// Create the matcher instance
+	m := &Matcher{
+		sectionSize: sectionSize,
+		schedulers:  make(map[uint]*scheduler),
+		retrievers:  make(chan chan uint),
+		counters:    make(chan chan uint),
+		retrievals:  make(chan chan *Retrieval),
+		deliveries:  make(chan *Retrieval),
+	}
+	// Calculate the bloom bit indexes for the groups we're interested in
+	m.filters = nil
+
+	for _, filter := range filters {
+		// Gather the bit indexes of the filter rule, special casing the nil filter
+		if len(filter) == 0 {
+			continue
+		}
+		bloomBits := make([]bloomIndexes, len(filter))
+		for i, clause := range filter {
+			if clause == nil {
+				bloomBits = nil
+				break
+			}
+			// The clause corresponds to the data of the third dimension of the input, which may be an address or a topic
+			// calcBloomIndexes calculates the three subscripts in the Bloom filter corresponding to this data (0-2048), that is, if the corresponding three bits in the Bloom filter are both 1, then the data may be clause it's here.
+
+			bloomBits[i] = calcBloomIndexes(clause)
+		}
+		// Accumulate the filter rules if no nil rule was within
+		// In the calculation, if only one of the bloomBits can be found. Then think that the whole is established.
+		if bloomBits != nil {
+			// different bloombits
+			m.filters = append(m.filters, bloomBits)
+		}
+	}
+	// For every bit, create a scheduler to load/download the bit vectors
+	for _, bloomIndexLists := range m.filters {
+		for _, bloomIndexList := range bloomIndexLists {
+			for _, bloomIndex := range bloomIndexList {
+				// For all possible subscripts. We all generate a scheduler to perform the corresponding position.
+				m.addScheduler(bloomIndex)
+			}
+		}
+	}
+	return m
+}
+```
+
+Start
+
+```go
+// Start starts the matching process and returns a stream of bloom matches in
+// a given range of blocks. If there are no more matches in the range, the result
+// channel is closed.
+func (m *Matcher) Start(begin, end uint64, results chan uint64) (*MatcherSession, error) {
+	// Make sure we're not creating concurrent sessions
+	if atomic.SwapUint32(&m.running, 1) == 1 {
+		return nil, errors.New("matcher already running")
+	}
+	defer atomic.StoreUint32(&m.running, 0)
+
+	// Initiate a new matching round
+	// A session is started, and as a return value, the life cycle of the lookup is managed.
+	session := &MatcherSession{
+		matcher: m,
+		quit:    make(chan struct{}),
+		kill:    make(chan struct{}),
+	}
+	for _, scheduler := range m.schedulers {
+		scheduler.reset()
+	}
+	// This run establishes the 
