@@ -793,4 +793,116 @@ func(m * Matcher) distributor(dist chan * request, session * MatcherSession) {
               assign(result.Bit)
             }
           }
-          /
+          // If we're in the process of shutting down, terminate
+        if allocs == 0 && shutdown == nil {
+          return
+        }
+    }
+  }
+}
+```
+
+The task receives AllocateRetrieval. The task received a task. Will return the search task for the specified bit.
+
+```go
+// AllocateRetrieval assigns a bloom bit index to a client process that can either
+// immediately reuest and fetch the section contents assigned to this bit or wait
+// a little while for more sections to be requested.
+func (s *MatcherSession) AllocateRetrieval() (uint, bool) {
+	fetcher := make(chan uint)
+
+	select {
+	case <-s.quit:
+		return 0, false
+	case s.matcher.retrievers <- fetcher:
+		bit, ok := <-fetcher
+		return bit, ok
+	}
+}
+```
+
+AllocateSections, the section query task that receives the specified bit.
+
+```go
+// AllocateSections assigns all or part of an already allocated bit-task queue
+// to the requesting process.
+func (s *MatcherSession) AllocateSections(bit uint, count int) []uint64 {
+	fetcher := make(chan *Retrieval)
+
+	select {
+	case <-s.quit:
+		return nil
+	case s.matcher.retrievals <- fetcher:
+		task := &Retrieval{
+			Bit:      bit,
+			Sections: make([]uint64, count),
+		}
+		fetcher <- task
+		return (<-fetcher).Sections
+	}
+}
+```
+
+DeliverSections, delivering the results to the deliveres channel.
+
+```go
+// DeliverSections delivers a batch of section bit-vectors for a specific bloom
+// bit index to be injected into the processing pipeline.
+func (s *MatcherSession) DeliverSections(bit uint, sections []uint64, bitsets [][]byte) {
+	select {
+	case <-s.kill:
+		return
+	case s.matcher.deliveries <- &Retrieval{Bit: bit, Sections: sections, Bitsets: bitsets}:
+	}
+}
+```
+
+The task executes the multiplex, and the multiplex function continuously picks up the task and delivers the task to the bloomRequest queue. Get results from the queue. Then deliver it to the distributor. Completed the entire process.
+
+```go
+// Multiplex polls the matcher session for rerieval tasks and multiplexes it into
+// the reuested retrieval queue to be serviced together with other sessions.
+//
+// This method will block for the lifetime of the session. Even after termination
+// of the session, any request in-flight need to be responded to! Empty responses
+// are fine though in that case.
+func (s *MatcherSession) Multiplex(batch int, wait time.Duration, mux chan chan *Retrieval) {
+	for {
+		// Allocate a new bloom bit index to retrieve data for, stopping when done
+		bit, ok := s.AllocateRetrieval()
+		if !ok {
+			return
+		}
+		// Bit allocated, throttle a bit if we're below our batch limit
+		if s.PendingSections(bit) < batch {
+			select {
+			case <-s.quit:
+				// Session terminating, we can't meaningfully service, abort
+				s.AllocateSections(bit, 0)
+				s.DeliverSections(bit, []uint64{}, [][]byte{})
+				return
+
+			case <-time.After(wait):
+				// Throttling up, fetch whatever's available
+			}
+		}
+		// Allocate as much as we can handle and request servicing
+		sections := s.AllocateSections(bit, batch)
+		request := make(chan *Retrieval)
+
+		select {
+		case <-s.quit:
+			// Session terminating, we can't meaningfully service, abort
+			s.DeliverSections(bit, sections, make([][]byte, len(sections)))
+			return
+
+		case mux <- request:
+			// Retrieval accepted, something must arrive before we're aborting
+			request <- &Retrieval{Bit: bit, Sections: sections}
+
+			result := <-request
+			s.DeliverSections(result.Bit, result.Sections, result.Bitsets)
+		}
+	}
+}
+```
