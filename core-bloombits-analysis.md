@@ -620,4 +620,177 @@ func (m *Matcher) subMatch(source chan *partialMatches, dist chan *request, bloo
 				return
 
 			case subres, ok := <-process:
-				// There is a problem here. Is it possible to order out. Because the channels are all c
+				// There is a problem here. Is it possible to order out. Because the channels are all cached. May be queried quickly
+				// View the implementation of the scheduler, the scheduler is guaranteed to be in order. How come in, how will you go out.
+				// Notified of a section being retrieved
+				if !ok {
+					return
+				}
+				// Gather all the sub-results and merge them together
+				var orVector []byte
+				for _, bloomSinks := range sectionSinks {
+					var andVector []byte
+					for _, bitSink := range bloomSinks {
+						// Here you can receive three values each representing the value of the Bloom filter corresponding to the subscript, and perform the AND operation on these three values.
+						// It is possible to get those blocks that may have corresponding values.
+						var data []byte
+						select {
+						case <-session.quit:
+							return
+						case data = <-bitSink:
+						}
+						if andVector == nil {
+							andVector = make([]byte, int(m.sectionSize/8))
+							copy(andVector, data)
+						} else {
+							bitutil.ANDBytes(andVector, andVector, data)
+						}
+					}
+					if orVector == nil { // Perform an Or operation on the data of the first dimension.
+						orVector = andVector
+					} else {
+						bitutil.ORBytes(orVector, orVector, andVector)
+					}
+				}
+
+				if orVector == nil { // Maybe the channel is closed.
+					orVector = make([]byte, int(m.sectionSize/8))
+				}
+				if subres.bitset != nil {
+					// Perform the AND operation with the last result entered. Remember that this value was initialized to all 1 at the beginning.
+					bitutil.ANDBytes(orVector, orVector, subres.bitset)
+				}
+				if bitutil.TestBytes(orVector) { // If not all 0 then add to the result. May give the next match or return.
+					select {
+					case <-session.quit:
+						return
+					case results <- &partialMatches{subres.section, orVector}:
+					}
+				}
+			}
+		}
+	}()
+	return results
+}
+```
+
+```go
+// distributor receives requests from the schedulers and queues them into a set
+// of pending requests, which are assigned to retrievers wanting to fulfil them.
+func(m * Matcher) distributor(dist chan * request, session * MatcherSession) {
+  defer session.pend.Done()
+  var (
+    requests = make(map[uint][] uint64) // Per-bit list of section requests, ordered by section number
+    unallocs = make(map[uint] struct {}) // Bits with pending requests but not allocated to any retriever
+    retrievers chan chan uint // Waiting retrievers (toggled to nil if unallocs is empty)
+  )
+  var (
+    allocs int // Number of active allocations to handle graceful shutdown requests
+    shutdown = session.quit // Shutdown request channel, will gracefully wait for pending requests
+  )
+  // assign is a helper method fo try to assign a pending bit an an actively
+  // listening servicer, or schedule it up for later when one arrives.
+  assign: = func(bit uint) {
+    select {
+      case fetcher := <-m.retrievers:
+          allocs++
+          fetcher < -bit
+      default:
+        // No retrievers active, start listening for new ones
+        retrievers = m.retrievers
+        unallocs[bit] = struct {} {}
+    }
+  }
+  for {
+    select {
+      case <-shutdown:
+        // Graceful shutdown requested, wait until all pending requests are honoured
+        if allocs == 0 {
+          return
+        }
+        shutdown = nil
+      case <-session.kill:
+        // Pending requests not honoured in time, hard terminate
+        return
+      case req := <-dist: // scheduler The sent request is added to the queue in the specified bit position.
+          // New retrieval request arrived to be distributed to some fetcher process
+          queue: = requests[req.bit]
+        index: = sort.Search(len(queue), func(i int) bool {
+          return queue[i] >= req.section
+        })
+        requests[req.bit] = append(queue[: index], append([] uint64 {
+            req.section
+          }, queue[index: ]...)...)
+          // If it's a new bit and we have waiting fetchers, allocate to them
+        if len(queue) == 0 {
+          assign(req.bit)
+        }
+      case fetcher := <-retrievers:
+          // New retriever arrived, find the lowest section-ed bit to assign
+          bit, best: = uint(0), uint64(math.MaxUint64)
+        for idx: = range unallocs {
+            if requests[idx][0] < best {
+              bit, best = idx, requests[idx][0]
+            }
+          }
+          // Stop tracking this bit (and alloc notifications if no more work is available)
+        delete(unallocs, bit)
+        if len(unallocs) == 0 {
+          retrievers = nil
+        }
+        allocs++
+        fetcher < -bit
+      case fetcher := <-m.counters:
+          // New task count request arrives, return number of items
+          fetcher < -uint(len(requests[ < -fetcher]))
+      case fetcher := <-m.retrievals:
+          // New fetcher waiting for tasks to retrieve, assign
+          task: = < -fetcher
+        if want: = len(task.Sections);
+        want >= len(requests[task.Bit]) {
+          task.Sections = requests[task.Bit]
+          delete(requests, task.Bit)
+        } else {
+          task.Sections = append(task.Sections[: 0], requests[task.Bit][: want]...)
+          requests[task.Bit] = append(requests[task.Bit][: 0], requests[task.Bit][want: ]...)
+        }
+        fetcher < -task
+          // If anything was left unallocated, try to assign to someone else
+        if len(requests[task.Bit]) > 0 {
+          assign(task.Bit)
+        }
+      case result := <-m.deliveries:
+          // New retrieval task response from fetcher, split out missing sections and
+          // deliver complete ones
+          var (
+            sections = make([] uint64, 0, len(result.Sections)) bitsets = make([][] byte, 0, len(result.Bitsets)) missing = make([] uint64, 0, len(result.Sections))
+          )
+        for i, bitset: = range result.Bitsets {
+            if len(bitset) == 0 { // if the task results are missing
+              missing = append(missing, result.Sections[i])
+              continue
+            }
+            sections = append(sections, result.Sections[i])
+            bitsets = append(bitsets, bitset)
+          }
+          // deliver result
+        m.schedulers[result.Bit].deliver(sections, bitsets)
+        allocs--
+        // Reschedule missing sections and allocate bit if newly available
+        if len(missing) > 0 { // regenerate the new task
+            queue: = requests[result.Bit]
+            for _,
+            section: = range missing {
+              index: = sort.Search(len(queue), func(i int) bool {
+                return queue[i] >= section
+              })
+              queue = append(queue[: index], append([] uint64 {
+                section
+              }, queue[index: ]...)...)
+            }
+            requests[result.Bit] = queue
+            if len(queue) == len(missing) {
+              assign(result.Bit)
+            }
+          }
+          /
