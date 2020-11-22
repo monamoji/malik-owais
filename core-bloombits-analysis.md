@@ -432,4 +432,192 @@ func (m *Matcher) Start(begin, end uint64, results chan uint64) (*MatcherSession
 	for _, scheduler := range m.schedulers {
 		scheduler.reset()
 	}
-	// This run establishes the 
+	// This run establishes the process and returns a partialMatches type of pipeline representing partial results of the query.
+	sink := m.run(begin, end, cap(results), session)
+
+	// Read the output from the result sink and deliver to the user
+	session.pend.Add(1)
+	go func() {
+		defer session.pend.Done()
+		defer close(results)
+
+		for {
+			select {
+			case <-session.quit:
+				return
+
+			case res, ok := <-sink:
+				// New match result found
+				// So you need to iterate through the bitmap, find the blocks that are set, and return the block number back.
+				if !ok {
+					return
+				}
+				// Calculate the first and last blocks of the section
+				sectionStart := res.section * m.sectionSize
+
+				first := sectionStart
+				if begin > first {
+					first = begin
+				}
+				last := sectionStart + m.sectionSize - 1
+				if end < last {
+					last = end
+				}
+				// Iterate over all the blocks in the section and return the matching ones
+				for i := first; i <= last; i++ {
+					// Skip the entire byte if no matches are found inside
+					next := res.bitset[(i-sectionStart)/8]
+					if next == 0 {
+						i += 7
+						continue
+					}
+					// Some bit it set, do the actual submatching
+					if bit := 7 - i%8; next&(1<<bit) != 0 {
+						select {
+						case <-session.quit:
+							return
+						case results <- i:
+						}
+					}
+				}
+			}
+		}
+	}()
+	return session, nil
+}
+```
+
+run method
+
+```go
+// run creates a daisy-chain of sub-matchers, one for the address set and one
+// for each topic set, each sub-matcher receiving a section only if the previous
+// ones have all found a potential match in one of the blocks of the section,
+// then binary AND-ing its own matches and forwaring the result to the next one.
+// The method starts feeding the section indexes into the first sub-matcher on a
+// new goroutine and returns a sink channel receiving the results.
+func (m *Matcher) run(begin, end uint64, buffer int, session *MatcherSession) chan *partialMatches {
+	// Create the source channel and feed section indexes into
+	source := make(chan *partialMatches, buffer)
+
+	session.pend.Add(1)
+	go func() {
+		defer session.pend.Done()
+		defer close(source)
+
+		for i := begin / m.sectionSize; i <= end/m.sectionSize; i++ {
+			// This for loop constructs the first input source of subMatch, and the remaining subMatch takes the previous result as its own source.
+			// The bitset field of this source is 0xff, which represents a complete match. It will be compared with the match of our step to get the result of this step match.
+			select {
+			case <-session.quit:
+				return
+			case source <- &partialMatches{i, bytes.Repeat([]byte{0xff}, int(m.sectionSize/8))}:
+			}
+		}
+	}()
+	// Assemble the daisy-chained filtering pipeline
+	next := source
+	dist := make(chan *request, buffer)
+
+	// Build the pipeline, the previous output as the input to the next subMatch.
+	for _, bloom := range m.filters {
+		next = m.subMatch(next, dist, bloom, session)
+	}
+	// Start the request distribution
+	session.pend.Add(1)
+	// distributor go routine
+	go m.distributor(dist, session)
+
+	return next
+}
+```
+
+subMatch method
+
+```go
+// subMatch creates a sub-matcher that filters for a set of addresses or topics, binary OR-s those matches, then
+// binary AND-s the result to the daisy-chain input (source) and forwards it to the daisy-chain output.
+// The matches of each address/topic are calculated by fetching the given sections of the three bloom bit indexes belonging to
+// that address/topic, and binary AND-ing those vectors together.
+
+// SubMatch is the most important function that combines the first dimension of the filters [][][3] with the second dimension or the third dimension.
+func (m *Matcher) subMatch(source chan *partialMatches, dist chan *request, bloom []bloomIndexes, session *MatcherSession) chan *partialMatches {
+	// Start the concurrent schedulers for each bit required by the bloom filter
+	// The incoming bloom []bloomIndexes parameter is the second, third dimension of filters [][3]
+
+	sectionSources := make([][3]chan uint64, len(bloom))
+	sectionSinks := make([][3]chan []byte, len(bloom))
+	for i, bits := range bloom { // i represents the number of second dimensions
+		for j, bit := range bits {  //j Represents the subscript of the Bloom filter. There are definitely only three values (0-2048).
+			sectionSources[i][j] = make(chan uint64, cap(source))
+			sectionSinks[i][j] = make(chan []byte, cap(source))
+			// Initiate a scheduling request for this bit, passing the section that needs to be queried via sectionSources[i][j]
+			// Receive results via sectionSinks[i][j]
+			// dist is the channel through which the scheduler passes the request. This is in the introduction of the scheduler.
+			m.schedulers[bit].run(sectionSources[i][j], dist, sectionSinks[i][j], session.quit, &session.pend)
+		}
+	}
+
+	process := make(chan *partialMatches, cap(source)) // entries from source are forwarded here after fetches have been initiated
+	results := make(chan *partialMatches, cap(source))
+
+	session.pend.Add(2)
+	go func() {
+		// Tear down the goroutine and terminate all source channels
+		defer session.pend.Done()
+		defer close(process)
+
+		defer func() {
+			for _, bloomSources := range sectionSources {
+				for _, bitSource := range bloomSources {
+					close(bitSource)
+				}
+			}
+		}()
+		// Read sections from the source channel and multiplex into all bit-schedulers
+		for {
+			select {
+			case <-session.quit:
+				return
+
+			case subres, ok := <-source:
+				// New subresult from previous link
+				if !ok {
+					return
+				}
+				// Multiplex the section index to all bit-schedulers
+				for _, bloomSources := range sectionSources {
+					for _, bitSource := range bloomSources {
+						// Pass to the input channel of all the schedulers above. Apply for these
+						// The specified bit of the section is searched.
+						// The result will be sent to sectionSinks[i][j]
+						select {
+						case <-session.quit:
+							return
+						case bitSource <- subres.section:
+						}
+					}
+				}
+				// Notify the processor that this section will become available
+				select {
+				case <-session.quit:
+					return
+				case process <- subres: // Wait until all requests are submitted to the scheduler to send a message to the process.
+				}
+			}
+		}
+	}()
+
+	go func() {
+		// Tear down the goroutine and terminate the final sink channel
+		defer session.pend.Done()
+		defer close(results)
+
+		// Read the source notifications and collect the delivered results
+		for {
+			select {
+			case <-session.quit:
+				return
+
+			case subres, ok := <-process:
+				// There is a problem here. Is it possible to order out. Because the channels are all c
