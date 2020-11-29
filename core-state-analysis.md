@@ -222,4 +222,253 @@ func (ch addLogChange) undo(s *StateDB) {
 	s.logSize--
 }
 
-// This is to increase the original byte[] of SHA3 seen by the VM, and incre
+// This is to increase the original byte[] of SHA3 seen by the VM, and increase the correspondence between SHA3 hash -> byte[]
+addPreimageChange struct {
+	hash common.Hash
+}
+func (ch addPreimageChange) undo(s *StateDB) {
+	delete(s.preimages, ch.hash)
+}
+
+touchChange struct {
+	account   *common.Address
+	prev      bool
+	prevDirty bool
+}
+// mark to delete
+var ripemd = common.HexToAddress("0000000000000000000000000000000000000003")
+func (ch touchChange) undo(s *StateDB) {
+	if !ch.prev && *ch.account != ripemd {
+		s.getStateObject(*ch.account).touched = ch.prev
+		if !ch.prevDirty {
+			delete(s.stateObjectsDirty, *ch.account)
+		}
+	}
+}
+```
+
+## state_object.go
+
+stateObject represents the Ethereum account being modified.
+
+data structure
+
+```go
+type Storage map[common.Hash]common.Hash
+
+// stateObject represents an Ethereum account which is being modified.
+// The usage pattern is as follows:
+// First you need to obtain a state object.
+// Account values can be accessed and modified through the object.
+// Finally, call CommitTrie to write the modified storage trie into a database.
+
+// The usage patterns are as follows:
+// First you need to get a state_object.
+// Account values can be accessed and modified by objects.
+// Finally, call CommitTrie to write the modified storage trie to the database.
+
+type stateObject struct {
+	address  common.Address
+	addrHash common.Hash // hash of ethereum address of the account
+	data     Account  // This is the actual Ethereum account information.
+	db       *StateDB // state database
+
+	// DB error.
+	// State objects are used by the consensus core and VM which are
+	// unable to deal with database-level errors. Any error that occurs
+	// during a database read is memoized here and will eventually be returned
+	// by StateDB.Commit.
+	//
+	// Write caches.
+	trie Trie // storage trie, which becomes non-nil on first access
+	code Code // contract bytecode, which gets set when code is loaded
+
+	cachedStorage Storage // Storage entry cache to avoid duplicate reads
+	dirtyStorage  Storage // Storage entries that need to be flushed to disk
+
+	// Cache flags.
+	// When an object is marked suicided it will be delete from the trie
+	// during the "update" phase of the state transition.
+	dirtyCode bool // true if the code was updated
+	suicided  bool
+	touched   bool
+	deleted   bool
+	onDirty   func(addr common.Address) // Callback method to mark a state object newly dirty
+}
+
+// Account is the Ethereum consensus representation of accounts.
+// These objects are stored in the main account trie.
+type Account struct {
+	Nonce    uint64
+	Balance  *big.Int
+	Root     common.Hash // merkle root of the storage trie
+	CodeHash []byte
+}
+```
+
+Constructor
+
+```go
+// newObject creates a state object.
+func newObject(db *StateDB, address common.Address, data Account, onDirty func(addr common.Address)) *stateObject {
+	if data.Balance == nil {
+		data.Balance = new(big.Int)
+	}
+	if data.CodeHash == nil {
+		data.CodeHash = emptyCodeHash
+	}
+	return &stateObject{
+		db:            db,
+		address:       address,
+		addrHash:      crypto.Keccak256Hash(address[:]),
+		data:          data,
+		cachedStorage: make(Storage),
+		dirtyStorage:  make(Storage),
+		onDirty:       onDirty,
+	}
+}
+```
+
+The encoding method RLP will only encode the Account object.
+
+```go
+// EncodeRLP implements rlp.Encoder.
+func (c *stateObject) EncodeRLP(w io.Writer) error {
+	return rlp.Encode(w, c.data)
+}
+```
+
+Some functions that change state
+
+```go
+// flush to state
+func (self *stateObject) markSuicided() {
+	self.suicided = true
+	if self.onDirty != nil {
+		self.onDirty(self.Address())
+		self.onDirty = nil
+	}
+}
+
+func (c *stateObject) touch() {
+	c.db.journal = append(c.db.journal, touchChange{
+		account:   &c.address,
+		prev:      c.touched,
+		prevDirty: c.onDirty == nil,
+	})
+	if c.onDirty != nil {
+		c.onDirty(c.Address())
+		c.onDirty = nil
+	}
+	c.touched = true
+}
+```
+
+Storage processing
+
+```go
+// getTrie from database
+func (c *stateObject) getTrie(db Database) Trie {
+	if c.trie == nil {
+		var err error
+		c.trie, err = db.OpenStorageTrie(c.addrHash, c.data.Root)
+		if err != nil {
+			c.trie, _ = db.OpenStorageTrie(c.addrHash, common.Hash{})
+			c.setError(fmt.Errorf("can't create storage trie: %v", err))
+		}
+	}
+	return c.trie
+}
+
+// GetState returns a value in account storage from hash input.
+func (self *stateObject) GetState(db Database, key common.Hash) common.Hash {
+	value, exists := self.cachedStorage[key]
+	if exists {
+		return value
+	}
+	// Load from DB in case it is missing.
+	enc, err := self.getTrie(db).TryGet(key[:])
+	if err != nil {
+		self.setError(err)
+		return common.Hash{}
+	}
+	if len(enc) > 0 {
+		_, content, _, err := rlp.Split(enc)
+		if err != nil {
+			self.setError(err)
+		}
+		value.SetBytes(content)
+	}
+	if (value != common.Hash{}) {
+		self.cachedStorage[key] = value
+	}
+	return value
+}
+
+// SetState updates a value in account storage.
+func (self *stateObject) SetState(db Database, key, value common.Hash) {
+	self.db.journal = append(self.db.journal, storageChange{
+		account:  &self.address,
+		key:      key,
+		prevalue: self.GetState(db, key),
+	})
+	self.setState(key, value)
+}
+
+func (self *stateObject) setState(key, value common.Hash) {
+	self.cachedStorage[key] = value
+	self.dirtyStorage[key] = value
+
+	if self.onDirty != nil {
+		self.onDirty(self.Address())
+		self.onDirty = nil
+	}
+}
+```
+
+Commit trie
+
+```go
+// CommitTrie the storage trie of the object to dwb.
+// This updates the trie root.
+func (self *stateObject) CommitTrie(db Database, dbw trie.DatabaseWriter) error {
+	self.updateTrie(db)
+	if self.dbErr != nil {
+		return self.dbErr
+	}
+	root, err := self.trie.CommitTo(dbw)
+	if err == nil {
+		self.data.Root = root
+	}
+	return err
+}
+
+// updateTrie writes cached storage modifications into the object's storage trie.
+func (self *stateObject) updateTrie(db Database) Trie {
+	tr := self.getTrie(db)
+	for key, value := range self.dirtyStorage {
+		delete(self.dirtyStorage, key)
+		if (value == common.Hash{}) {
+			self.setError(tr.TryDelete(key[:]))
+			continue
+		}
+		// Encoding []byte cannot fail, ok to ignore the error.
+		// default will return empty
+		v, _ := rlp.EncodeToBytes(bytes.TrimLeft(value[:], "\x00"))
+		self.setError(tr.TryUpdate(key[:], v))
+	}
+	return tr
+}
+
+// UpdateRoot sets the trie root to the current root hash of
+func (self *stateObject) updateRoot(db Database) {
+	self.updateTrie(db)
+	self.data.Root = self.trie.Hash()
+}
+```
+
+With some additional features, deepCopy provides a deep copy of state_object.
+
+```go
+func (self *stateObject) deepCopy(db *StateDB, onDirty func(addr common.Address)) *stateObject {
+	stateObject := newObject(db, sel
