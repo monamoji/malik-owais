@@ -471,4 +471,203 @@ With some additional features, deepCopy provides a deep copy of state_object.
 
 ```go
 func (self *stateObject) deepCopy(db *StateDB, onDirty func(addr common.Address)) *stateObject {
-	stateObject := newObject(db, sel
+	stateObject := newObject(db, self.address, self.data, onDirty)
+	if self.trie != nil {
+		stateObject.trie = db.db.CopyTrie(self.trie)
+	}
+	stateObject.code = self.code
+	stateObject.dirtyStorage = self.dirtyStorage.Copy()
+	stateObject.cachedStorage = self.dirtyStorage.Copy()
+	stateObject.suicided = self.suicided
+	stateObject.dirtyCode = self.dirtyCode
+	stateObject.deleted = self.deleted
+	return stateObject
+}
+```
+
+## statedb.go
+
+stateDB is used to store everything about merkle trie in Ethereum. StateDB is responsible for caching and storing nested state. This is the general query interface for retrieving contracts and accounts.
+
+data structure
+
+```go
+type StateDB struct {
+	db   Database  // backend databasse
+	trie Trie	   // trie: main account trie
+
+	// This map holds 'live' objects, which will get modified while processing a state transition.
+	// stateObjects is used to cache objects
+	// stateObjectsDirty is used to cache the modified objects
+	stateObjects      map[common.Address]*stateObject
+	stateObjectsDirty map[common.Address]struct{}
+
+	// DB error.
+	// State objects are used by the consensus core and VM which are
+	// unable to deal with database-level errors. Any error that occurs
+	// during a database read is memoized here and will eventually be returned
+	// by StateDB.Commit.
+	dbErr error
+
+	// The refund counter, also used by state transitioning.
+	refund *big.Int
+
+	thash, bhash common.Hash
+	txIndex      int
+	logs         map[common.Hash][]*types.Log
+	logSize      uint
+
+	preimages map[common.Hash][]byte  // Mapping relationship of SHA3->byte[] calculated by EVM
+
+	// Journal of state modifications. This is the backbone of
+	// Snapshot and RevertToSnapshot.
+	journal        journal
+	validRevisions []revision
+	nextRevisionId int
+
+	lock sync.Mutex
+}
+```
+
+Contructor
+
+```go
+// Usage: statedb, _ := state.New(common.Hash{}, state.NewDatabase(db))
+
+// Create a new state from a given trie
+func New(root common.Hash, db Database) (*StateDB, error) {
+	tr, err := db.OpenTrie(root)
+	if err != nil {
+		return nil, err
+	}
+	return &StateDB{
+		db:                db,
+		trie:              tr,
+		stateObjects:      make(map[common.Address]*stateObject),
+		stateObjectsDirty: make(map[common.Address]struct{}),
+		refund:            new(big.Int),
+		logs:              make(map[common.Hash][]*types.Log),
+		preimages:         make(map[common.Hash][]byte),
+	}, nil
+}
+```
+
+### for Log Processing
+
+State provides Log processing, which is quite unexpected, because Log is actually stored in the blockchain, not stored in the state trie, state provides Log processing, using several functions based on the following. The strange thing is that I haven't seen how to delete the information in the log. If I don't delete it, it should accumulate more. Need a logs delete.
+
+The Prepare function is executed at the beginning of the transaction execution.
+
+The AddLog function is executed by the VM during transaction execution. Add a log. At the same time, the log is associated with the transaction, and the information of the partial transaction is added.
+
+GetLogs function, the transaction is completed and taken away.
+
+```go
+// Prepare sets the current transaction hash and index and block hash which is
+// used when the EVM emits new state logs.
+func (self *StateDB) Prepare(thash, bhash common.Hash, ti int) {
+	self.thash = thash
+	self.bhash = bhash
+	self.txIndex = ti
+}
+
+func (self *StateDB) AddLog(log *types.Log) {
+	self.journal = append(self.journal, addLogChange{txhash: self.thash})
+
+	log.TxHash = self.thash
+	log.BlockHash = self.bhash
+	log.TxIndex = uint(self.txIndex)
+	log.Index = self.logSize
+	self.logs[self.thash] = append(self.logs[self.thash], log)
+	self.logSize++
+}
+func (self *StateDB) GetLogs(hash common.Hash) []*types.Log {
+	return self.logs[hash]
+}
+
+func (self *StateDB) Logs() []*types.Log {
+	var logs []*types.Log
+	for _, lgs := range self.logs {
+		logs = append(logs, lgs...)
+	}
+	return logs
+}
+```
+
+### stateObject processing
+
+getStateObject, first obtained from the cache, if not from the trie, and loaded into the cache.
+
+```go
+// Retrieve a state object given my the address. Returns nil if not found.
+// This kind of cache can be used in orderbook, we load database into orderbook structure
+// which is based on extended red-black tree.
+func (self *StateDB) getStateObject(addr common.Address) (stateObject *stateObject) {
+	// Prefer 'live' objects.
+	if obj := self.stateObjects[addr]; obj != nil {
+		if obj.deleted {
+			return nil
+		}
+		return obj
+	}
+
+	// Load the object from the database.
+	enc, err := self.trie.TryGet(addr[:])
+	if len(enc) == 0 {
+		self.setError(err)
+		return nil
+	}
+	var data Account
+	if err := rlp.DecodeBytes(enc, &data); err != nil {
+		log.Error("Failed to decode state object", "addr", addr, "err", err)
+		return nil
+	}
+	// Insert into the live set.
+	obj := newObject(self, addr, data, self.MarkStateObjectDirty)
+	self.setStateObject(obj)
+	return obj
+}
+```
+
+MarkStateObjectDirty, set a stateObject to Dirty. Insert an empty structure directly into the address corresponding to stateObjectDirty.
+
+```go
+// MarkStateObjectDirty adds the specified object to the dirty map to avoid costly
+// state object cache iteration to find a handful of modified ones.
+func (self *StateDB) MarkStateObjectDirty(addr common.Address) {
+	self.stateObjectsDirty[addr] = struct{}{}
+}
+```
+
+### Snapshot and rollback
+
+Snapshot can create a snapshot and then roll back to which state via RevertToSnapshot. This function is done by journal. Each step of the modification will add an undo log to the journal. If you need to roll back, you only need to execute the undo log.
+
+```go
+// Snapshot returns an identifier for the current revision of the state.
+func (self *StateDB) Snapshot() int {
+	id := self.nextRevisionId
+	self.nextRevisionId++
+	self.validRevisions = append(self.validRevisions, revision{id, len(self.journal)})
+	return id
+}
+
+// RevertToSnapshot reverts all state changes made since the given revision.
+func (self *StateDB) RevertToSnapshot(revid int) {
+	// Find the snapshot in the stack of valid snapshots.
+	idx := sort.Search(len(self.validRevisions), func(i int) bool {
+		return self.validRevisions[i].id >= revid
+	})
+	if idx == len(self.validRevisions) || self.validRevisions[idx].id != revid {
+		panic(fmt.Errorf("revision id %v cannot be reverted", revid))
+	}
+	snapshot := self.validRevisions[idx].journalIndex
+
+	// Replay the journal to undo changes. It is like undo step by step in photoshop.
+	for i := len(self.journal) - 1; i >= snapshot; i-- {
+		self.journal[i].undo(self)
+	}
+	self.journal = self.journal[:snapshot]
+
+	// Remove invalidated snapshots from the stack.
+	self.va
