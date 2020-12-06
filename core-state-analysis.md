@@ -670,4 +670,84 @@ func (self *StateDB) RevertToSnapshot(revid int) {
 	self.journal = self.journal[:snapshot]
 
 	// Remove invalidated snapshots from the stack.
-	self.va
+	self.validRevisions = self.validRevisions[:idx]
+}
+```
+
+### Get the root hash value of the intermediate state
+
+IntermediateRoot is used to calculate the hash value of the root of the current state trie. This method will be called during the execution of the transaction. Will be stored in the transaction receipt
+
+The Finalise method will call the update method to write the changes stored in the cache layer to the trie database. But this time has not yet written to the underlying database. The commit has not been called yet, the data is still in memory, and it has not been filed.
+
+```go
+// Finalise finalises the state by removing the self destructed objects
+// and clears the journal as well as the refunds.
+func (s *StateDB) Finalise(deleteEmptyObjects bool) {
+	for addr := range s.stateObjectsDirty {
+		stateObject := s.stateObjects[addr]
+		if stateObject.suicided || (deleteEmptyObjects && stateObject.empty()) {
+			s.deleteStateObject(stateObject)
+		} else {
+			stateObject.updateRoot(s.db)
+			s.updateStateObject(stateObject)
+		}
+	}
+	// Invalidate journal because reverting across transactions is not allowed.
+	s.clearJournalAndRefund()
+}
+
+// IntermediateRoot computes the current root hash of the state trie.
+// It is called in between transactions to get the root hash that
+// goes into transaction receipts.
+func (s *StateDB) IntermediateRoot(deleteEmptyObjects bool) common.Hash {
+	s.Finalise(deleteEmptyObjects)
+	return s.trie.Hash()
+}
+```
+
+### commit method
+
+CommitTo is used to submit changes
+
+```go
+// CommitTo writes the state to the given database.
+func (s *StateDB) CommitTo(dbw trie.DatabaseWriter, deleteEmptyObjects bool) (root common.Hash, err error) {
+	// clear all journal in local
+	defer s.clearJournalAndRefund()
+
+	// Commit objects to the trie.
+	for addr, stateObject := range s.stateObjects {
+		_, isDirty := s.stateObjectsDirty[addr]
+		switch {
+		case stateObject.suicided || (isDirty && deleteEmptyObjects && stateObject.empty()):
+			// If the object has been removed, don't bother syncing it
+			// and just mark it for deletion in the trie.
+			s.deleteStateObject(stateObject)
+		case isDirty:
+			// Write any contract code associated with the state object
+			if stateObject.code != nil && stateObject.dirtyCode {
+				if err := dbw.Put(stateObject.CodeHash(), stateObject.code); err != nil {
+					return common.Hash{}, err
+				}
+				stateObject.dirtyCode = false
+			}
+			// Write any storage changes in the state object to its storage trie.
+			if err := stateObject.CommitTrie(s.db, dbw); err != nil {
+				return common.Hash{}, err
+			}
+			// Update the object in the main account trie.
+			s.updateStateObject(stateObject)
+		}
+		delete(s.stateObjectsDirty, addr)
+	}
+	// Write trie changes.
+	root, err = s.trie.CommitTo(dbw)
+	log.Debug("Trie cache stats after commit", "misses", trie.CacheMisses(), "unloads", trie.CacheUnloads())
+	return root, err
+}
+```
+
+### Sum up
+
+The state package provides the functionality of state management for users and contracts. Manages various state transitions for states and contracts. Cache, trie, database. Log and rollback features.
