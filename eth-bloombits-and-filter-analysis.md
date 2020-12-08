@@ -334,4 +334,203 @@ func(api\ * PublicFilterAPI) GetFilterChanges(id rpc.ID)(interface {}, error) {
                 return returnHashes(hashes), nil
             case LogsSubscription:
                 logs: = f.logs
-                f.logs = 
+                f.logs = nil
+                return returnLogs(logs), nil
+        }
+    }
+    return [] interface {} {}, fmt.Errorf("filter not found")
+}
+```
+
+For a channel that can establish a long connection, you can directly use the rpc send subscription mode, so that the client can directly receive the filtering information without calling the polling method. You can see that this mode is not added to the filters container, and there is no timeout management. In other words, two modes are supported.
+
+```go
+// NewPendingTransactions creates a subscription that is triggered each time a transaction
+// enters the transaction pool and was signed from one of the transactions this nodes manages.
+func(api * PublicFilterAPI) NewPendingTransactions(ctx context.Context)( * rpc.Subscription, error) {
+		notifier, supported: = rpc.NotifierFromContext(ctx)
+		if !supported {
+				return &rpc.Subscription {}, rpc.ErrNotificationsUnsupported
+		}
+
+		rpcSub: = notifier.CreateSubscription()
+
+		go func() {
+				txHashes: = make(chan common.Hash)
+				pendingTxSub: = api.events.SubscribePendingTxEvents(txHashes)
+
+				for {
+						select {
+								case h:
+										= < -txHashes:
+												notifier.Notify(rpcSub.ID, h)
+								case <-rpcSub.Err():
+										pendingTxSub.Unsubscribe()
+										return
+								case <-notifier.Closed():
+										pendingTxSub.Unsubscribe()
+										return
+						}
+				}
+		}()
+
+		return rpcSub, nil
+}
+```
+
+The log filtering function filters the logs according to the parameters specified by FilterCriteria, starts the block, ends the block, addresses and Topics, and introduces a new object filter.
+
+```go
+// FilterCriteria represents a request to create a new filter.
+type FilterCriteria struct {
+		FromBlock * big.Int
+		ToBlock * big.Int
+		Addresses[] common.Address
+		Topics[][] common.Hash
+}
+// GetLogs returns logs matching the given argument that are stored within the state.
+//
+// https://github.com/ethereum/wiki/wiki/JSON-RPC#eth_getlogs
+func(api * PublicFilterAPI) GetLogs(ctx context.Context, crit FilterCriteria)([] * types.Log, error) {
+		// Convert the RPC block numbers into internal representations
+		if crit.FromBlock == nil {
+				crit.FromBlock = big.NewInt(rpc.LatestBlockNumber.Int64())
+		}
+		if crit.ToBlock == nil {
+						crit.ToBlock = big.NewInt(rpc.LatestBlockNumber.Int64())
+				}
+				// Create and run the filter to get all the logs
+		filter: = New(api.backend, crit.FromBlock.Int64(), crit.ToBlock.Int64(), crit.Addresses, crit.Topics)
+		logs, err: = filter.Logs(ctx)
+		if err != nil {
+				return nil, err
+		}
+		return returnLogs(logs), err
+}
+```
+
+## filter.go
+
+There is a Filter object defined in fiter.go. This object is mainly used to perform log filtering based on the block's BloomIndexer and Bloom filter.
+
+### Data structure
+
+```go
+type Backend interface {
+	ChainDb() ethdb.Database
+	EventMux() *event.TypeMux
+	HeaderByNumber(ctx context.Context, blockNr rpc.BlockNumber) (*types.Header, error)
+	GetReceipts(ctx context.Context, blockHash common.Hash) (types.Receipts, error)
+
+	SubscribeTxPreEvent(chan<- core.TxPreEvent) event.Subscription
+	SubscribeChainEvent(ch chan<- core.ChainEvent) event.Subscription
+	SubscribeRemovedLogsEvent(ch chan<- core.RemovedLogsEvent) event.Subscription
+	SubscribeLogsEvent(ch chan<- []*types.Log) event.Subscription
+
+	BloomStatus() (uint64, uint64)
+	ServiceFilter(ctx context.Context, session *bloombits.MatcherSession)
+}
+
+// Filter can be used to retrieve and filter logs.
+type Filter struct {
+	backend Backend				// backend
+
+	db         ethdb.Database	// database
+	begin, end int64			// Start, ending block
+	addresses  []common.Address	// Filter address
+	topics     [][]common.Hash	// Filter topic
+
+	matcher *bloombits.Matcher	// Bloom filter matcher
+}
+```
+
+The constructor adds both address and topic to the filters container. Then build a bloombits.NewMatcher(size, filters). This function is implemented in the core and will not be explained for the time being.
+
+```go
+// New creates a new filter which uses a bloom filter on blocks to figure out whether
+// a particular block is interesting or not.
+func New(backend Backend, begin, end int64, addresses []common.Address, topics [][]common.Hash) *Filter {
+	// Flatten the address and topic filter clauses into a single bloombits filter
+	// system. Since the bloombits are not positional, nil topics are permitted,
+	// which get flattened into a nil byte slice.
+	var filters [][][]byte
+	if len(addresses) > 0 {
+		filter := make([][]byte, len(addresses))
+		for i, address := range addresses {
+			filter[i] = address.Bytes()
+		}
+		filters = append(filters, filter)
+	}
+	for _, topicList := range topics {
+		filter := make([][]byte, len(topicList))
+		for i, topic := range topicList {
+			filter[i] = topic.Bytes()
+		}
+		filters = append(filters, filter)
+	}
+	// Assemble and return the filter
+	size, _ := backend.BloomStatus()
+
+	return &Filter{
+		backend:   backend,
+		begin:     begin,
+		end:       end,
+		addresses: addresses,
+		topics:    topics,
+		db:        backend.ChainDb(),
+		matcher:   bloombits.NewMatcher(size, filters),
+	}
+}
+```
+
+Logs performs filtering
+
+```go
+// Logs searches the blockchain for matching log entries, returning all from the
+// first block that contains matches, updating the start of the filter accordingly.
+func (f *Filter) Logs(ctx context.Context) ([]*types.Log, error) {
+	// Figure out the limits of the filter range
+	header, _ := f.backend.HeaderByNumber(ctx, rpc.LatestBlockNumber)
+	if header == nil {
+		return nil, nil
+	}
+	head := header.Number.Uint64()
+
+	if f.begin == -1 {
+		f.begin = int64(head)
+	}
+	end := uint64(f.end)
+	if f.end == -1 {
+		end = head
+	}
+	// Gather all indexed logs, and finish with non indexed ones
+	var (
+		logs []*types.Log
+		err  error
+	)
+	size, sections := f.backend.BloomStatus()
+	// indexed is the maximum value of the block in which the index was created.
+	// the perform an index search
+	if indexed := sections * size; indexed > uint64(f.begin) {
+		if indexed > end {
+			logs, err = f.indexedLogs(ctx, end)
+		} else {
+			logs, err = f.indexedLogs(ctx, indexed-1)
+		}
+		if err != nil {
+			return logs, err
+		}
+	}
+	// Perform a non-indexed search
+	rest, err := f.unindexedLogs(ctx, end)
+	logs = append(logs, rest...)
+	return logs, err
+}
+```
+
+Index search
+
+```go
+// indexedLogs returns the logs matching the filter criteria based on the bloom
+// bits indexed available locally or via the network.
+func (f *Filter) indexedLogs(ctx con
