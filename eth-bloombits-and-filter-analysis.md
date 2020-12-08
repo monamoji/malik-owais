@@ -145,4 +145,193 @@ Reset implements the ChainIndexerBackend method and starts a new section.
 // Reset implements core.ChainIndexerBackend, starting a new bloombits index
 // section.
 func (b *BloomIndexer) Reset(section uint64) {
-	gen, err := bl
+	gen, err := bloombits.NewGenerator(uint(b.size))
+	if err != nil {
+		panic(err)
+	}
+	b.gen, b.section, b.head = gen, section, common.Hash{}
+}
+```
+
+Process implements ChainIndexerBackend, adding a new block header to index
+
+```go
+// Process implements core.ChainIndexerBackend, adding a new header's bloom into
+// the index.
+func (b *BloomIndexer) Process(header *types.Header) {
+	b.gen.AddBloom(uint(header.Number.Uint64()-b.section*b.size), header.Bloom)
+	b.head = header.Hash()
+}
+```
+
+The Commit method implements ChainIndexerBackend, persists and writes to the database.
+
+```go
+// Commit implements core.ChainIndexerBackend, finalizing the bloom section and
+// writing it out into the database.
+func(b *BloomIndexer) Commit() error {
+    batch: = b.db.NewBatch()
+    for i: = 0;i < types.BloomBitLength;i++{
+        bits, err: = b.gen.Bitset(uint(i))
+        if err != nil {
+            return err
+        }
+        core.WriteBloomBits(batch, uint(i), b.section, b.head, bitutil.CompressBytes(bits))
+    }
+    return batch.Write()
+}
+```
+
+## filter/api.go source code analysis
+
+The eth/filter package contains the ability to provide filtering to the user. The user can filter the transaction or block by calling and then continue to get the result. If there is no operation for 5 minutes, the filter will be deleted.
+
+The structure of the filter.
+
+```go
+var (
+	deadline = 5 * time.Minute // consider a filter inactive if it has not been polled for within deadline
+)
+
+// filter is a helper struct that holds meta information over the filter type
+// and associated subscription in the event system.
+type filter struct {
+	typ      Type			// type of filter
+	deadline *time.Timer // filter is inactiv when deadline triggers, the timer is triggered
+	hashes   []common.Hash //filtered hash results
+	crit     FilterCriteria	//filter condition
+	logs     []*types.Log    //log information
+	s        *Subscription // associated subscription in event system, the subscriber in the event system
+}
+```
+
+Construction method
+
+```go
+// PublicFilterAPI offers support to create and manage filters. This will allow external clients to retrieve various
+// information related to the Ethereum protocol such als blocks, transactions and logs.
+// PublicFilterAPI - used to create and manage filters, allow external clients to get some information like block, transaction and log information.
+type PublicFilterAPI struct {
+	backend   Backend
+	mux       *event.TypeMux
+	quit      chan struct{}
+	chainDb   ethdb.Database
+	events    *EventSystem
+	filtersMu sync.Mutex
+	filters   map[rpc.ID]*filter
+}
+
+// NewPublicFilterAPI returns a new PublicFilterAPI instance.
+func NewPublicFilterAPI(backend Backend, lightMode bool) *PublicFilterAPI {
+	api := &PublicFilterAPI{
+		backend: backend,
+		mux:     backend.EventMux(),
+		chainDb: backend.ChainDb(),
+		events:  NewEventSystem(backend.EventMux(), backend, lightMode),
+		filters: make(map[rpc.ID]*filter),
+	}
+	go api.timeoutLoop()
+
+	return api
+}
+```
+
+### Timeout check
+
+```go
+// timeoutLoop runs every 5 minutes and deletes filters that have not been recently used.
+// Tt is started when the api is created.
+//  Check every 5 minutes. If the filter expires, delete it.
+func (api *PublicFilterAPI) timeoutLoop() {
+  ticker := time.NewTicker(5 * time.Minute)
+  for {
+    <-ticker.C
+    api.filtersMu.Lock()
+    for id, f := range api.filters {
+      select {
+      case <-f.deadline.C:
+        f.s.Unsubscribe()
+        delete(api.filters, id)
+      default:
+        continue
+      }
+    }
+    api.filtersMu.Unlock()
+  }
+}
+```
+
+NewPendingTransactionFilter to create a PendingTransactionFilter. This method is used for channels that cannot create long connections (such as HTTP). If a channel that can establish long links (such as WebSocket) can be processed using the send subscription mode provided by rpc, there is no need for a continuous round. Inquire
+
+```go
+// NewPendingTransactionFilter creates a filter that fetches pending transaction hashes
+// as transactions enter the pending state.
+//
+// It is part of the filter package because this filter can be used throug the
+// `eth_getFilterChanges` polling method that is also used for log filters.
+//
+// https://github.com/ethereum/wiki/wiki/JSON-RPC#eth_newpendingtransactionfilter
+func(api\ * PublicFilterAPI) NewPendingTransactionFilter() rpc.ID {
+    var (
+        pendingTxs = make(chan common.Hash)
+        // Subscribe to this message in the event system
+        pendingTxSub = api.events.SubscribePendingTxEvents(pendingTxs)
+    )
+    api.filtersMu.Lock()
+    api.filters[pendingTxSub.ID] = & filter {
+        typ: PendingTransactionsSubscription,
+        deadline: time.NewTimer(deadline),
+        hashes: make([] common.Hash, 0),
+        s: pendingTxSub
+    }
+    api.filtersMu.Unlock()
+    go func() {
+        for {
+            select {
+                case ph:
+                    = < -pendingTxs: // received pendingTxs，stored in the filter hashes
+                        api.filtersMu.Lock()
+                    if f, found: = api.filters[pendingTxSub.ID];
+                    found {
+                        f.hashes = append(f.hashes, ph)
+                    }
+                    api.filtersMu.Unlock()
+                case <-pendingTxSub.Err():
+                    api.filtersMu.Lock()
+                    delete(api.filters, pendingTxSub.ID)
+                    api.filtersMu.Unlock()
+                    return
+            }
+        }
+    }()
+    return pendingTxSub.ID
+}
+```
+
+Polling: GetFilterChanges
+
+```go
+// GetFilterChanges returns the logs for the filter with the given id since
+// last time it was called. This can be used for polling.
+// For pending transaction and block filters the result is []common.Hash.
+// (pending)Log filters return []Log.
+// https://github.com/ethereum/wiki/wiki/JSON-RPC#eth_getfilterchanges
+func(api\ * PublicFilterAPI) GetFilterChanges(id rpc.ID)(interface {}, error) {
+    api.filtersMu.Lock()
+    defer api.filtersMu.Unlock()
+    if f, found: = api.filters[id];
+    found {
+        if !f.deadline.Stop() { // If the timer has been triggered, but the filter has not been removed, then we first receive the value of the timer and then reset the timer.
+            // timer expired but filter is not yet removed in timeout loop
+            // receive timer value and reset timer
+            < -f.deadline.C
+        }
+        f.deadline.Reset(deadline)
+        switch f.typ {
+            case PendingTransactionsSubscription, BlocksSubscription:
+                hashes: = f.hashes
+                f.hashes = nil
+                return returnHashes(hashes), nil
+            case LogsSubscription:
+                logs: = f.logs
+                f.logs = 
