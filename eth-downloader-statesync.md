@@ -338,3 +338,53 @@ func (s *stateSync) run() {
 // assignment of new tasks to peers (including sending it to them) as well as
 // for the processing of inbound data. Note, that the loop does not directly
 // receive data from peers, rather those are buffered up in the downloader and
+// pushed here async. The reason is to decouple processing from data receipt
+// and timeouts.
+func (s *stateSync) loop() error {
+	// Listen for new peer events to assign tasks to them
+	newPeer := make(chan *peerConnection, 1024)
+	peerSub := s.d.peers.SubscribeNewPeers(newPeer)
+	defer peerSub.Unsubscribe()
+
+	// Keep assigning new tasks until the sync completes or aborts
+	for s.sched.Pending() > 0 {
+		// Refresh the data from the cache to the persistent store. This is the size specified by the command line --cache.
+		if err := s.commit(false); err != nil {
+			return err
+		}
+
+		s.assignTasks()
+		// Tasks assigned, wait for something to happen
+		select {
+		case <-newPeer:
+			// New peer arrived, try to assign it download tasks
+
+		case <-s.cancel:
+			return errCancelStateFetch
+
+		case req := <-s.deliver:
+			// Received the return message sent by the runStateSync method. Note that the return message contains the successful request and also contains the unsuccessful request.
+			// Response, disconnect or timeout triggered, drop the peer if stalling
+			log.Trace("Received node data response", "peer", req.peer.id, "count", len(req.response), "dropped", req.dropped, "timeout", !req.dropped && req.timedOut())
+			// at least more than 2 requests to process
+			if len(req.items) <= 2 && !req.dropped && req.timedOut() {
+				// 2 items are the minimum requested, if even that times out, we've no use of
+				// this peer at the moment.
+				log.Warn("Stalling state sync, dropping peer", "peer", req.peer.id)
+				s.d.dropPeer(req.peer.id)
+			}
+			// Process all the received blobs and check for stale delivery
+			stale, err := s.process(req)
+			if err != nil {
+				log.Warn("Node data write error", "err", err)
+				return err
+			}
+			// The the delivery contains requested data, mark the node idle (otherwise it's a timed out delivery)
+			if !stale {
+				req.peer.SetNodeDataIdle(len(req.response))
+			}
+		}
+	}
+	return s.commit(true)
+}
+```
