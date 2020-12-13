@@ -533,4 +533,140 @@ Index search
 ```go
 // indexedLogs returns the logs matching the filter criteria based on the bloom
 // bits indexed available locally or via the network.
-func (f *Filter) indexedLogs(ctx con
+func (f *Filter) indexedLogs(ctx context.Context, end uint64) ([]*types.Log, error) {
+	// Create a matcher session and request servicing from the backend
+	matches := make(chan uint64, 64)
+	// Start matcher
+	session, err := f.matcher.Start(uint64(f.begin), end, matches)
+	if err != nil {
+		return nil, err
+	}
+	defer session.Close(time.Second)
+	// Perform filtering services. These are all in the core.
+
+	f.backend.ServiceFilter(ctx, session)
+
+	// Iterate over the matches until exhausted or context closed
+	var logs []*types.Log
+
+	for {
+		select {
+		case number, ok := <-matches:
+			// Abort if all matches have been fulfilled
+			if !ok {  // Did not receive the value and the channel has been closed
+				f.begin = int64(end) + 1  //Update begin, for the following non-indexed search
+				return logs, nil
+			}
+			// Retrieve the suggested block and pull any truly matching logs
+			header, err := f.backend.HeaderByNumber(ctx, rpc.BlockNumber(number))
+			if header == nil || err != nil {
+				return logs, err
+			}
+			found, err := f.checkMatches(ctx, header) //find matching values
+			if err != nil {
+				return logs, err
+			}
+			logs = append(logs, found...)
+
+		case <-ctx.Done():
+			return logs, ctx.Err()
+		}
+	}
+}
+```
+
+checkMatches, get all the receipts and get all the logs from the receipt. Execute the filterLogs method.
+
+```go
+// checkMatches checks if the receipts belonging to the given header contain any log events that
+// match the filter criteria. This function is called when the bloom filter signals a potential match.
+func(f * Filter) checkMatches(ctx context.Context, header * types.Header)(logs[] * types.Log, err error) {
+    // Get the logs of the block
+    receipts, err: = f.backend.GetReceipts(ctx, header.Hash())
+    if err != nil {
+        return nil, err
+    }
+    var unfiltered[] * types.Log
+    for\ _, receipt: = range receipts {
+        unfiltered = append(unfiltered, ([]\ * types.Log)(receipt.Logs)...)
+    }
+    logs = filterLogs(unfiltered, nil, nil, f.addresses, f.topics)
+    if len(logs) > 0 {
+        return logs, nil
+    }
+    return nil, nil
+}
+```
+
+filterLogs, this method finds the matching in the given logs. And return.
+
+```go
+// filterLogs creates a slice of logs matching the given criteria.
+func filterLogs(logs []*types.Log, fromBlock, toBlock *big.Int, addresses []common.Address, topics [][]common.Hash) []*types.Log {
+	var ret []*types.Log
+Logs:
+	for _, log := range logs {
+		if fromBlock != nil && fromBlock.Int64() >= 0 && fromBlock.Uint64() > log.BlockNumber {
+			continue
+		}
+		if toBlock != nil && toBlock.Int64() >= 0 && toBlock.Uint64() < log.BlockNumber {
+			continue
+		}
+
+		if len(addresses) > 0 && !includes(addresses, log.Address) {
+			continue
+		}
+		// If the to filtered topics is greater than the amount of topics in logs, skip.
+		if len(topics) > len(log.Topics) {
+			continue Logs
+		}
+		for i, topics := range topics {
+			match := len(topics) == 0 // empty rule set == wildcard
+			for _, topic := range topics {
+				if log.Topics[i] == topic {
+					match = true
+					break
+				}
+			}
+			if !match {
+				continue Logs
+			}
+		}
+		ret = append(ret, log)
+	}
+	return ret
+}
+```
+
+unindexedLogs, a non-indexed query that loops through all the blocks. First use the header.Bloom inside the block to see if it is possible. If it exists, use checkMatches to retrieve all matches.
+
+```go
+// indexedLogs returns the logs matching the filter criteria based on raw block
+// iteration and bloom matching.
+func(f * Filter) unindexedLogs(ctx context.Context, end uint64)([] * types.Log, error) {
+    var logs[]\ * types.Log
+    for;
+    f.begin <= int64(end);
+    f.begin++{
+        header, err: = f.backend.HeaderByNumber(ctx, rpc.BlockNumber(f.begin))
+        if header == nil || err != nil {
+            return logs, err
+        }
+        if bloomFilter(header.Bloom, f.addresses, f.topics) {
+            found, err: = f.checkMatches(ctx, header)
+            if err != nil {
+                return logs, err
+            }
+            logs = append(logs, found...)
+        }
+    }
+    return logs, nil
+}
+```
+
+## Sum up
+
+The filter source package mainly implements two functions.
+
+- Provides a filter RPC that publishes subscription patterns. Used to provide real-time filtering of transactions, blocks, logs, etc. to the rpc client.
+- A log filtering mode based on bloomIndexer is provided. In this mode, Bloom filtering can be performed on a large number of blocks quickly. Filtering operations for historical logs are also provided.
