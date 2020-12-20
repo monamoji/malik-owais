@@ -136,4 +136,189 @@ func (f *Fetcher) loop() {
 				f.forgetBlock(hash)
 				continue
 			}
-			// i
+			// insert it
+			f.insert(op.origin, op.block)
+		}
+		// Wait for an outside event to occur
+		select {
+		case <-f.quit:
+			// Fetcher terminating, abort all operations
+			return
+
+		case notification := <-f.notify: // When NewBlockHashesMsg is received, the hash value of the block that is not yet in the local blockchain will be sent to the notify channel by calling the fetcher's Notify method.
+			...
+
+		case op := <-f.inject: // The Receiver Enqueue method is called when NewBlockMsg is received. This method will send the currently received block to the inject channel.
+			...
+			f.enqueue(op.origin, op.block)
+
+		case hash := <-f.done: // When the import of a block is completed, the hash value of the block is sent to the done channel.
+			...
+
+		case <-fetchTimer.C: // fetchTimer timer, periodically fetch the block headers that need fetch
+			...
+
+		case <-completeTimer.C: // The completeTimer timer periodically fetches the block that needs fetch
+			...
+
+		case filter := <-f.headerFilter: // When a message from BlockHeadersMsg is received (some block headers are received), these messages are posted to the headerFilter queue. This will leave the data belonging to the fetcher request, and the rest will be returned for use by other systems.
+			...
+
+		case filter := <-f.bodyFilter: // When the BlockBodiesMsg message is received, these messages are delivered to the bodyFilter queue. This will leave the data belonging to the fetcher request, and the rest will be returned for use by other systems.
+			...
+		}
+	}
+}
+```
+
+### Block header filtering process
+
+#### FilterHeaders request
+
+The FilterHeaders method is called when a BlockHeadersMsg is received. This method first delivers a channel filter to the headerFilter. Then post a headerFilterTask task to the filter. Then block waiting for the filter queue to return a message.
+
+```go
+// FilterHeaders extracts all the headers that were explicitly requested by the fetcher,
+// returning those that should be handled differently.
+func (f *Fetcher) FilterHeaders(peer string, headers []*types.Header, time time.Time) []*types.Header {
+	log.Trace("Filtering headers", "peer", peer, "headers", len(headers))
+
+	// Send the filter channel to the fetcher
+	filter := make(chan *headerFilterTask)
+
+	select {
+	case f.headerFilter <- filter:
+	case <-f.quit:
+		return nil
+	}
+	// Request the filtering of the header list
+	select {
+	case filter <- &headerFilterTask{peer: peer, headers: headers, time: time}:
+	case <-f.quit:
+		return nil
+	}
+	// Retrieve the headers remaining after filtering
+	select {
+	case task := <-filter:
+		return task.headers
+	case <-f.quit:
+		return nil
+	}
+}
+```
+
+#### headerFilter processing
+
+this is handled in the go routine of loop().
+
+```go
+case filter := <-f.headerFilter:
+	// Headers arrived from a remote peer. Extract those that were explicitly
+	// requested by the fetcher, and return everything else so it's delivered
+	// to other parts of the system.
+	var task *headerFilterTask
+	select {
+	case task = <-filter:
+	case <-f.quit:
+		return
+	}
+	headerFilterInMeter.Mark(int64(len(task.headers)))
+
+	// Split the batch of headers into unknown ones (to return to the caller),
+	// known incomplete ones (requiring body retrievals) and completed blocks.
+	unknown, incomplete, complete := []*types.Header{}, []*announce{}, []*types.Block{}
+	for _, header := range task.headers {
+		hash := header.Hash()
+
+		// Filter fetcher-requested headers from other synchronisation algorithms
+		if announce := f.fetching[hash]; announce != nil && announce.origin == task.peer && f.fetched[hash] == nil && f.completing[hash] == nil && f.queued[hash] == nil {
+			// If the delivered header does not match the promised number, drop the announcer
+			if header.Number.Uint64() != announce.number {
+				log.Trace("Invalid block number fetched", "peer", announce.origin, "hash", header.Hash(), "announced", announce.number, "provided", header.Number)
+				f.dropPeer(announce.origin)
+				f.forgetHash(hash)
+				continue
+			}
+			// Only keep if not imported by other means
+			if f.getBlock(hash) == nil {
+				announce.header = header
+				announce.time = task.time
+
+				// If the block is empty (header only), short circuit into the final import queue
+				if header.TxHash == types.DeriveSha(types.Transactions{}) && header.UncleHash == types.CalcUncleHash([]*types.Header{}) {
+					log.Trace("Block empty, skipping body retrieval", "peer", announce.origin, "number", header.Number, "hash", header.Hash())
+
+					block := types.NewBlockWithHeader(header)
+					block.ReceivedAt = task.time
+
+					complete = append(complete, block)
+					f.completing[hash] = announce
+					continue
+				}
+				// Otherwise add to the list of blocks needing completion
+				incomplete = append(incomplete, announce)
+			} else {
+				log.Trace("Block already imported, discarding header", "peer", announce.origin, "number", header.Number, "hash", header.Hash())
+				f.forgetHash(hash)
+			}
+		} else {
+			// Fetcher doesn't know about it, add to the return list
+			unknown = append(unknown, header)
+		}
+	}
+	headerFilterOutMeter.Mark(int64(len(unknown)))
+	select {
+	case filter <- &headerFilterTask{headers: unknown, time: task.time}:
+	case <-f.quit:
+		return
+	}
+	// Schedule the retrieved headers for body completion
+	for _, announce := range incomplete {
+		hash := announce.header.Hash()
+		if _, ok := f.completing[hash]; ok { // already done
+			continue
+		}
+		// wait for map to be processed
+		f.fetched[hash] = append(f.fetched[hash], announce)
+		if len(f.fetched) == 1 { // If the fetched map has only one element that has just been added.
+			f.rescheduleComplete(completeTimer)
+		}
+	}
+	// Schedule the header-only blocks for import
+	for _, block := range complete {
+		if announce := f.completing[block.Hash()]; announce != nil {
+			f.enqueue(announce.origin, block)
+		}
+	}
+```
+
+#### bodyFilter processing
+
+Similar to the above processing.
+
+```go
+case filter := <-f.bodyFilter:
+	// Block bodies arrived, extract any explicitly requested blocks, return the rest
+	var task *bodyFilterTask
+	select {
+	case task = <-filter:
+	case <-f.quit:
+		return
+	}
+	bodyFilterInMeter.Mark(int64(len(task.transactions)))
+
+	blocks := []*types.Block{}
+	for i := 0; i < len(task.transactions) && i < len(task.uncles); i++ {
+		// Match up a body to any possible completion request
+		matched := false
+
+		for hash, announce := range f.completing {
+			if f.queued[hash] == nil {
+				txnHash := types.DeriveSha(types.Transactions(task.transactions[i]))
+				uncleHash := types.CalcUncleHash(task.uncles[i])
+
+				if txnHash == announce.header.TxHash && uncleHash == announce.header.UncleHash && announce.origin == task.peer {
+					// Mark the body matched, reassemble if still unknown
+					matched = true
+
+					if f.getBloc
