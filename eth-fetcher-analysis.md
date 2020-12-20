@@ -321,4 +321,209 @@ case filter := <-f.bodyFilter:
 					// Mark the body matched, reassemble if still unknown
 					matched = true
 
-					if f.getBloc
+					if f.getBlock(hash) == nil {
+						block := types.NewBlockWithHeader(announce.header).WithBody(task.transactions[i], task.uncles[i])
+						block.ReceivedAt = task.time
+
+						blocks = append(blocks, block)
+					} else {
+						f.forgetHash(hash)
+					}
+				}
+			}
+		}
+		if matched {
+			task.transactions = append(task.transactions[:i], task.transactions[i+1:]...)
+			task.uncles = append(task.uncles[:i], task.uncles[i+1:]...)
+			i--
+			continue
+		}
+	}
+
+	bodyFilterOutMeter.Mark(int64(len(task.transactions)))
+	select {
+	case filter <- task:
+	case <-f.quit:
+		return
+	}
+	// Schedule the retrieved blocks for ordered import
+	for _, block := range blocks {
+		if announce := f.completing[block.Hash()]; announce != nil {
+			f.enqueue(announce.origin, block)
+		}
+	}
+```
+
+#### notification processing
+
+When NewBlockHashesMsg is received, the hash value of the block that is not yet in the local blockchain will be sent to the notify channel by calling the fetcher's Notify method.
+
+```go
+// Notify announces the fetcher of the potential availability of a new block in
+// the network.
+func (f *Fetcher) Notify(peer string, hash common.Hash, number uint64, time time.Time,
+	headerFetcher headerRequesterFn, bodyFetcher bodyRequesterFn) error {
+	block := &announce{
+		hash:        hash,
+		number:      number,
+		time:        time,
+		origin:      peer,
+		fetchHeader: headerFetcher,
+		fetchBodies: bodyFetcher,
+	}
+	select {
+	case f.notify <- block:
+		return nil
+	case <-f.quit:
+		return errTerminated
+	}
+}
+```
+
+The processing in the loop, mainly to check and then joined the announced container waiting for timing processing.
+
+```go
+case notification := <-f.notify:
+		// A block was announced, make sure the peer isn't DOSing us
+		propAnnounceInMeter.Mark(1)
+
+		count := f.announces[notification.origin] + 1
+		if count > hashLimit {  //hashLimit 256
+			log.Debug("Peer exceeded outstanding announces", "peer", notification.origin, "limit", hashLimit)
+			propAnnounceDOSMeter.Mark(1)
+			break
+		}
+		// If we have a valid block number, check that it's potentially useful
+		if notification.number > 0 {
+			if dist := int64(notification.number) - int64(f.chainHeight()); dist < -maxUncleDist || dist > maxQueueDist {
+				log.Debug("Peer discarded announcement", "peer", notification.origin, "number", notification.number, "hash", notification.hash, "distance", dist)
+				propAnnounceDropMeter.Mark(1)
+				break
+			}
+		}
+		// All is well, schedule the announce if block's not yet downloading
+		if _, ok := f.fetching[notification.hash]; ok {
+			break
+		}
+		if _, ok := f.completing[notification.hash]; ok {
+			break
+		}
+		f.announces[notification.origin] = count
+		f.announced[notification.hash] = append(f.announced[notification.hash], notification)
+		if f.announceChangeHook != nil && len(f.announced[notification.hash]) == 1 {
+			f.announceChangeHook(notification.hash, true)
+		}
+		if len(f.announced) == 1 {
+			f.rescheduleFetch(fetchTimer)
+		}
+```
+
+#### Enqueue processing
+
+The Receiver Enqueue method is called when NewBlockMsg is received. This method will send the currently received block to the inject channel. You can see that this method generates an inject object and sends it to the inject channel.
+
+```go
+// Enqueue tries to fill gaps the the fetcher's future import queue.
+func (f *Fetcher) Enqueue(peer string, block *types.Block) error {
+	op := &inject{
+		origin: peer,
+		block:  block,
+	}
+	select {
+	case f.inject <- op:
+		return nil
+	case <-f.quit:
+		return errTerminated
+	}
+}
+```
+
+Inject channel processing is very simple, directly join the queue to wait for import
+
+```go
+case op := <-f.inject:
+		// A direct block insertion was requested, try and fill any pending gaps
+		propBroadcastInMeter.Mark(1)
+		f.enqueue(op.origin, op.block)
+```
+
+enqueue
+
+```go
+// enqueue schedules a new future import operation, if the block to be imported
+// has not yet been seen.
+func (f *Fetcher) enqueue(peer string, block *types.Block) {
+	hash := block.Hash()
+
+	// Ensure the peer isn't DOSing us
+	count := f.queues[peer] + 1
+	if count > blockLimit { // blockLimit 64
+		log.Debug("Discarded propagated block, exceeded allowance", "peer", peer, "number", block.Number(), "hash", hash, "limit", blockLimit)
+		propBroadcastDOSMeter.Mark(1)
+		f.forgetHash(hash)
+		return
+	}
+	// Discard any past or too distant blocks
+	if dist := int64(block.NumberU64()) - int64(f.chainHeight()); dist < -maxUncleDist || dist > maxQueueDist {
+		log.Debug("Discarded propagated block, too far away", "peer", peer, "number", block.Number(), "hash", hash, "distance", dist)
+		propBroadcastDropMeter.Mark(1)
+		f.forgetHash(hash)
+		return
+	}
+	// Schedule the block for future importing
+	if _, ok := f.queued[hash]; !ok {
+		op := &inject{
+			origin: peer,
+			block:  block,
+		}
+		f.queues[peer] = count
+		f.queued[hash] = op
+		f.queue.Push(op, -float32(block.NumberU64()))
+		if f.queueChangeHook != nil {
+			f.queueChangeHook(op.block.Hash(), true)
+		}
+		log.Debug("Queued propagated block", "peer", peer, "number", block.Number(), "hash", hash, "queued", f.queue.Size())
+	}
+}
+```
+
+#### timer processing
+
+There are two timers in total. fetchTimer and completeTimer are responsible for getting the block header and getting the block body respectively.
+
+```mermaid
+graph LR
+	announced[fetchTimer: fetch header] --> fetching[headerFilter]
+	fetching --> fetched[completeTimer: fetch body]
+	fetched --> completing[bodyFilter]
+	completing --> enqueue[task.done]
+	enqueue --> forgetHash
+```
+
+Found a problem. The completed container may leak. If a body request for a hash is sent. But the request failed and the other party did not return. At this time the completing container was not cleaned up. Is it possible to cause problems?
+
+```go
+case <-fetchTimer.C:
+	// At least one block's timer ran out, check for needing retrieval
+	request := make(map[string][]common.Hash)
+
+	for hash, announces := range f.announced {
+		// time limit
+		// The earliest received announcement and passed the arriveTimeout-gatherSlack for such a long time.
+		if time.Since(announces[0].time) > arriveTimeout-gatherSlack {
+			// Pick a random peer to retrieve from, reset all others
+			announce := announces[rand.Intn(len(announces))]
+			f.forgetHash(hash)
+
+			// If the block still didn't arrive, queue for fetching
+			if f.getBlock(hash) == nil {
+				request[announce.origin] = append(request[announce.origin], hash)
+				f.fetching[hash] = announce
+			}
+		}
+	}
+	// Send out all block header requests
+	for peer, hashes := range request {
+		log.Trace("Fetching scheduled headers", "peer", peer, "list", hashes)
+
+		// Create a closure of the fetch and schedule in on a 
