@@ -526,4 +526,103 @@ case <-fetchTimer.C:
 	for peer, hashes := range request {
 		log.Trace("Fetching scheduled headers", "peer", peer, "list", hashes)
 
-		// Create a closure of the fetch and schedule in on a 
+		// Create a closure of the fetch and schedule in on a new thread
+		fetchHeader, hashes := f.fetching[hashes[0]].fetchHeader, hashes
+		go func() {
+			if f.fetchingHook != nil {
+				f.fetchingHook(hashes)
+			}
+			for _, hash := range hashes {
+				headerFetchMeter.Mark(1)
+				fetchHeader(hash) // Suboptimal, but protocol doesn't allow batch header retrievals
+			}
+		}()
+	}
+	// Schedule the next fetch if blocks are still pending
+	f.rescheduleFetch(fetchTimer)
+
+case <-completeTimer.C:
+	// At least one header's timer ran out, retrieve everything
+	request := make(map[string][]common.Hash)
+
+	for hash, announces := range f.fetched {
+		// Pick a random peer to retrieve from, reset all others
+		announce := announces[rand.Intn(len(announces))]
+		f.forgetHash(hash)
+
+		// If the block still didn't arrive, queue for completion
+		if f.getBlock(hash) == nil {
+			request[announce.origin] = append(request[announce.origin], hash)
+			f.completing[hash] = announce
+		}
+	}
+	// Send out all block body requests
+	for peer, hashes := range request {
+		log.Trace("Fetching scheduled bodies", "peer", peer, "list", hashes)
+
+		// Create a closure of the fetch and schedule in on a new thread
+		if f.completingHook != nil {
+			f.completingHook(hashes)
+		}
+		bodyFetchMeter.Mark(int64(len(hashes)))
+		go f.completing[hashes[0]].fetchBodies(hashes)
+	}
+	// Schedule the next fetch if blocks are still pending
+	f.rescheduleComplete(completeTimer)
+```
+
+#### Some other methods
+
+Fetcher insert method. This method inserts the given block into the local blockchain.
+
+```go
+// insert spawns a new goroutine to run a block insertion into the chain. If the
+// block's number is at the same height as the current import phase, if updates
+// the phase states accordingly.
+func (f *Fetcher) insert(peer string, block *types.Block) {
+	hash := block.Hash()
+
+	// Run the import on a new thread
+	log.Debug("Importing propagated block", "peer", peer, "number", block.Number(), "hash", hash)
+	go func() {
+		defer func() { f.done <- hash }()
+
+		// If the parent's unknown, abort insertion
+		parent := f.getBlock(block.ParentHash())
+		if parent == nil {
+			log.Debug("Unknown parent of propagated block", "peer", peer, "number", block.Number(), "hash", hash, "parent", block.ParentHash())
+			return
+		}
+		// Quickly validate the header and propagate the block if it passes
+		switch err := f.verifyHeader(block.Header()); err {
+		case nil:
+			// All ok, quickly propagate to our peers that we have just received a valid block
+			propBroadcastOutTimer.UpdateSince(block.ReceivedAt)
+			go f.broadcastBlock(block, true)
+
+		case consensus.ErrFutureBlock:
+			// Weird future block, don't fail, but neither propagate
+
+		default:
+			// Something went very wrong, drop the peer
+			log.Debug("Propagated block verification failed", "peer", peer, "number", block.Number(), "hash", hash, "err", err)
+			f.dropPeer(peer)
+			return
+		}
+		// Run the actual import and log any issues
+		if _, err := f.insertChain(types.Blocks{block}); err != nil {
+			log.Debug("Propagated block import failed", "peer", peer, "number", block.Number(), "hash", hash, "err", err)
+			return
+		}
+		// If import succeeded, broadcast the block
+		// If the insertion is successful, then the broadcast block, the second parameter is false. Then only the hash of the block will be broadcast.
+		propAnnounceOutTimer.UpdateSince(block.ReceivedAt)
+		go f.broadcastBlock(block, false)
+
+		// Invoke the testing hook if needed
+		if f.importedHook != nil {
+			f.importedHook(block)
+		}
+	}()
+}
+```
