@@ -78,4 +78,81 @@ Another interesting attack vector is if a signer (or a group of signers) tries t
 
 ## Attack vector: spammer signer
 
-The final small attack vector is that malicious signers inject new voting suggestions into each block. Since the node needs to count all votes to create an actual list of authorized signers, they need to track all votes by time. There is no limit to the voting window, which may grow slowly, but it is unlimited. The solution is to place a W block's moving w
+The final small attack vector is that malicious signers inject new voting suggestions into each block. Since the node needs to count all votes to create an actual list of authorized signers, they need to track all votes by time. There is no limit to the voting window, which may grow slowly, but it is unlimited. The solution is to place a W block's moving window, after which the vote is considered stale. A sensible window may be 1-2 times. We call this an epoch.
+
+## Attack vector: Concurrent blocks
+
+If the number of authorized signers are N, and we allow each signer to mint 1 block out of K, then at any point in time N-K+1 miners are allowed to mint. To avoid these racing for blocks, every signer would add a small random "offset" to the time it releases a new block. This ensures that small forks are rare, but occasionally still happen (as on the main net). If a signer is caught abusing it's authority and causing chaos, it can be voted out.
+
+## Notes
+
+### Does this indicate that we recommend using a testnet that is being reviewed?
+
+The proposal suggests that, given the malicious nature of certain actors and the weaknesses of the PoW program in the “monopoly funds” network, it is best to establish a network with a certain garbage filtering function that developers can rely on to test Its program.
+Why regulate PoA?
+Different customers will be better in different situations. Go may be great in a server-side environment, but CPP may be better suited to run on RPI Zero.
+Is manual voting a lot of trouble?
+This is an implementation detail, but the signer can use the contract-based voting strategy to take advantage of the full power of the EVM and push only the results to the head of the average node for verification.
+
+## Clarification and feedback
+
+- This recommendation does not preclude the client from running a PoW-based test network, whether it is Ropsten or a new test network based on it. Ideally, customers offer a way to connect PoW and PoA-based test networks (#225 (comment)).
+
+- Although the protocol parameters can be configured in the destruction of the client implementer, the Rinkeby network should be as close as possible to the primary network. This includes dynamic GasLimit, variable block time of around 15 seconds, GasPrice, etc. (#225 (comment)).
+
+- The program requires at least K signers to stay online, as this is the minimum number of people needed to ensure “minimize” diversity. This means that if K is exceeded, the network stops. This should be resolved by ensuring that the signer is a high-running machine, and that the failed machine is voted out in time (#225 (comment)) before too many failures occur.
+
+- The proposal does not address the "legal" spam issue, just as an attacker effectively uses testnet to create garbage, but without PoW mining, an attacker may not be able to gain unlimited ether attacks. One possibility is to provide a way to get ether based on a GitHub (or any other way) account in a limited way (eg 10 times a day) (#225 (comment)).
+
+- It has been suggested to create a checkpoint block for each epoch that contains a list of authorized signers at the time. This will allow later light customers to say "synchronize from here" without having to start from the origin. This can be added to the extradata field (#225(comment)) as a prefix before signing.
+
+## Clique PoA Protocol (Clique proof-of-authority consensus protocol )
+
+We define the following constants:
+
+- EPOCH_LENGTH：Checkpoints and reset the number of blocks for pending voting.
+  - Recommended 30000 to be similar to the ethhash epoch of the main network
+- BLOCK_PERIOD：The smallest difference between the timestamps of two consecutive blocks.
+  - Recommendation 15, to be similar to the ethhash epoch of the main network
+- EXTRA_VANITY：A fixed number of ExtraData prefix bytes are reserved for the signer vanity.
+  - The recommended 32 bytes are the same length as the current ExtraData.
+- EXTRA_SEAL：A fixed number of extra data suffix bytes reserved for the signer's stamp.
+  - The 65 bytes of the signature are saved, based on the standard secp256k1 curve.
+- NONCE_AUTH：Magic random number 0xffffffffffffffff vote to add a new signer.
+- NONCE_DROP：The magic random number 0x0000000000000000 votes to remove the signer.
+- UNCLE_HASH：Always Keccak256 (RLP([])) as Uncles has no meaning outside of PoW.
+- DIFF_NOTURN：If you don't have your signature yet, the difficulty of the block you signed is the difficulty.
+  - Recommendation 1, because it only needs to be an arbitrary baseline constant.
+- DIFF_INTURN：If your current turn is your signature, then the difficulty of your signature.
+  - Recommendation 2, which is more difficult than a signer who does not have a turn.
+
+We also define the following constants for each block:
+
+- BLOCK_NUMBER：The height of the block in the chain. The height of the genesis block is 0.
+- SIGNER_COUNT：The number of authorized signers that are valid on a particular instance in the blockchain.
+- SIGNER_INDEX：The index in the sorted list of the current authorized signer.
+- SIGNER_LIMIT：Every so many blocks, the signer can only sign one. - There must be floor(SIGNER_COUNT / 2)+1 so many signers agree to reach a resolution.
+
+We re-adjust the purpose of the block header field as follows:
+
+- beneficiary：It is recommended to modify the address of the authorized signer list. - Zero should be filled normally, only when voting.
+
+  - Nonetheless, arbitrary values ​​(even meaningless values, such as throwing non-signers) are allowed to avoid adding extra complexity around the voting mechanism.
+  - The block must be padded with zeros at the checkpoint (ie epoch conversion).
+
+- nonce：Signer's suggestion about the account defined in the Beneficiary field.
+  - NONCE_DROP proposes to deauthorize the beneficiary as an existing signer.
+  - NONCE_AUTH proposes to authorize beneficiaries as new signers.
+  - The block must be filled with zeros at the checkpoint.
+  - No other value other than the above (now).
+- extraData： The combined field of vanity, checkpointing and signer signatures.
+  - The first EXTRA_VANITY byte (fixed length) can contain any signer vanity data.
+  - The last EXTRA_SEAL byte (fixed length) is the signer signature of the sealed title.
+  - The checkpoint block must contain a list of signers (N \* 20 bytes), otherwise omitted.
+  - The list of signers in the Additional Data section of the checkpoint block must be sorted in ascending order.
+- mixHash：Reserved for forks. Additional data similar to Dao
+  - Zero must be filled during normal operation.
+- ommersHash：Must be UNCLE_HASH, because Uncles has no meaning outside of PoW.
+- timestamp：Must be at least the timestamp of the parent block + BLOCK_PERIOD.
+- difficulty：Contains the independent score of the block to derive the quality of the chain.
+  - If BLOCK_NUMBER%SIGNER
