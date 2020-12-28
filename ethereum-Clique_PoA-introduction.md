@@ -155,4 +155,52 @@ We re-adjust the purpose of the block header field as follows:
 - ommersHash：Must be UNCLE_HASH, because Uncles has no meaning outside of PoW.
 - timestamp：Must be at least the timestamp of the parent block + BLOCK_PERIOD.
 - difficulty：Contains the independent score of the block to derive the quality of the chain.
-  - If BLOCK_NUMBER%SIGNER
+  - If BLOCK_NUMBER%SIGNER_COUNT! = SIGNER_INDEX, must be DIFF_NOTURN
+  - Must be DIFF_INTURN if BLOCK_NUMBER%SIGNER_COUNT == SIGNER_INDEX
+
+### Authorizing a block
+
+In order to authorize a block for the network, the signer needs to sign everything that contains the signature itself. This means that the hash contains every field in the block header (including nonce and mixDigest), as well as extraData in addition to the 65-byte signature suffix. These fields are hashed in the order they are defined in the Yellow Book.
+
+The hash is signed using the standard secp256k1 curve, and the resulting 65-byte signature (R, S, V, where V is 0 or 1) is embedded in the extraData as a trailing 65-byte suffix.
+
+To ensure that a malicious signer (signature key loss) cannot be compromised on the network, each signer can sign up to one SIGNER_LIMIT contiguous block. The order is not fixed, but the signer of (DIFF_INTURN) is more difficult to check out than (DIFF_NOTURN)
+
+#### Authorization strategy
+
+As long as the signer meets the above specifications, they can authorize and assign the blocks they think are appropriate. The following suggested strategies will reduce network traffic and forks, so this is a suggested feature:
+
+- If the signer is allowed to sign a block (on the authorization list and has not recently signed).
+  - Calculate the best signature time for the next block (parent + BLOCK_PERIOD).
+  - If it is the turn, wait for the exact time to arrive, sign and play immediately.
+  - If there is no turn, delay rand (SIGNER_COUNT \* 500ms) for a long time signature. This small strategy will ensure that the current turn of the signer (who is heavier) has a slight advantage over signing and propagating and outbound signers. In addition, the scheme allows for a certain scale as the number of signers increases.
+
+### Voting signer
+
+Each epoch conversion (including the genesis block) acts as a stateless checkpoint, and capable clients should be able to synchronize without any previous state. This means that the new epoch header must not contain votes, all uncommitted votes will be discarded and counted from the beginning.
+
+For all non-epoch conversion blocks:
+
+- The signer can vote for the block using his own signed block to make a change to the authorization list.
+- Only one latest vote is kept for each proposal.
+- As the chain progresses, the vote will also take effect (allowing the proposal to be submitted at the same time).
+- The proposal SIGNER_LIMIT, which reached the majority opinion, takes effect immediately.
+- Invalid proposals are not penalized for the simplicity of the client implementation.
+
+**The proposal in force means giving up all pending votes on the proposal (whether in favor or against) and starting with a clear list.**
+
+### Cascade voting
+
+Complex cases may occur during signer cancellation. If the previously authorized signer is revoked, the number of signers required to approve the proposal may be reduced by one. This may lead to a consensus on one or more pending proposals, which may further affect the new proposal.
+
+When multiple conflicting proposals are passed at the same time (for example, adding a new signer vs deleting an existing proposer), it is not obvious that the situation is evaluated, and the evaluation order may completely change the result of the final authorization list. Since the signer may reverse their own vote in each of their own blocks, it is not so obvious which proposal will be "first".
+
+In order to avoid the defects caused by cascading implementation, the solution is to explicitly prohibit the cascading effect. In other words: only the current title/voting beneficiary can be added to or removed from the authorization list. If this leads to consensus on other recommendations, then when their respective beneficiaries “trigger” again, these recommendations will be implemented (because most people's consensus is still at this point).
+
+### Voting strategy
+
+Since the blockchain can have very small reorgs, the naïve voting mechanism of "cast-and-forget" may not be optimal, as blocks containing singleton votes may not end in the final chain.
+
+A simple but working strategy is to allow users to configure "proposals" on the signer (eg "add 0x ...", "drop 0x ..."). Sign the code and then you can choose a random recommendation for each block it signs and injects. This ensures that multiple concurrent proposals and reorgs are ultimately noticed on the chain.
+
+This list may expire after a certain number of blocks/epoch, but it is important to realize that "seeing" a proposal does not mean that it will not be reassembled, so it should not be abandoned immediately when the proposal passes.
