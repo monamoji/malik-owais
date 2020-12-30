@@ -249,4 +249,21 @@ func (f *Feed) Send(value interface{}) (nsent int) {
 		chosen, recv, _ := reflect.Select(cases)
 		if chosen == 0 /* <-f.removeSub */ {
 			index := f.sendCases.find(recv.Interface())
-			f.sendCases = f.sen
+			f.sendCases = f.sendCases.delete(index)
+			if index >= 0 && index < len(cases) {
+				cases = f.sendCases[:len(cases)-1]
+			}
+		} else {
+			cases = cases.deactivate(chosen)
+			nsent++
+		}
+	}
+
+	// Forget about the sent value and hand off the send lock.
+	for i := firstSubSendCase; i < len(f.sendCases); i++ {
+		f.sendCases[i].Send = reflect.Value{}
+	}
+	f.sendLock <- struct{}{}
+	return nsent
+}
+```
