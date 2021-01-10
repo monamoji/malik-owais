@@ -220,3 +220,78 @@ func (db *nodeDB) lastPong(id NodeID) time.Time {
 func (db *nodeDB) updateLastPong(id NodeID, instance time.Time) error {
 	return db.storeInt64(makeKey(id, nodeDBDiscoverPong), instance.Unix())
 }
+
+// findFails retrieves the number of findnode failures since bonding.
+func (db *nodeDB) findFails(id NodeID) int {
+	return int(db.fetchInt64(makeKey(id, nodeDBDiscoverFindFails)))
+}
+
+// updateFindFails updates the number of findnode failures since bonding.
+func (db *nodeDB) updateFindFails(id NodeID, fails int) error {
+	return db.storeInt64(makeKey(id, nodeDBDiscoverFindFails), int64(fails))
+}
+```
+
+Randomly pick the appropriate seed node from the database
+
+```go
+// querySeeds retrieves random nodes to be used as potential seed nodes
+// for bootstrapping.
+func (db *nodeDB) querySeeds(n int, maxAge time.Duration) []*Node {
+	var (
+		now   = time.Now()
+		nodes = make([]*Node, 0, n)
+		it    = db.lvl.NewIterator(nil, nil)
+		id    NodeID
+	)
+	defer it.Release()
+
+seek:
+	for seeks := 0; len(nodes) < n && seeks < n*5; seeks++ {
+		// Seek to a random entry. The first byte is incremented by a
+		// random amount each time in order to increase the likelihood
+		// of hitting all existing nodes in very small databases.
+		ctr := id[0]
+		rand.Read(id[:])
+		id[0] = ctr + id[0]%16
+		it.Seek(makeKey(id, nodeDBDiscoverRoot))
+
+		n := nextNode(it)
+		if n == nil {
+			id[0] = 0
+			continue seek // iterator exhausted
+		}
+		if n.ID == db.self {
+			continue seek
+		}
+		if now.Sub(db.lastPong(n.ID)) > maxAge {
+			continue seek
+		}
+		for i := range nodes {
+			if nodes[i].ID == n.ID {
+				continue seek // duplicate
+			}
+		}
+		nodes = append(nodes, n)
+	}
+	return nodes
+}
+
+// reads the next node record from the iterator, skipping over other
+// database entries.
+func nextNode(it iterator.Iterator) *Node {
+	for end := false; !end; end = !it.Next() {
+		id, field := splitKey(it.Key())
+		if field != nodeDBDiscoverRoot {
+			continue
+		}
+		var n Node
+		if err := rlp.DecodeBytes(it.Value(), &n); err != nil {
+			log.Warn("Failed to decode node RLP", "id", id, "err", err)
+			continue
+		}
+		return &n
+	}
+	return nil
+}
+```
