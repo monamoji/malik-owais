@@ -148,4 +148,126 @@ func (p *Peer) startProtocols(writeStart <-chan struct{}, writeErr chan<- error)
 		if p.events != nil {
 			rw = newMsgEventer(rw, p.events, p.ID(), proto.Name)
 		}
-		p.l
+		p.log.Trace(fmt.Sprintf("Starting protocol %s/%d", proto.Name, proto.Version))
+		// This is equivalent to opening a goroutine for each protocol. Call its Run method.
+		go func() {
+			// proto.Run(p, rw) This method should be an infinite loop. If you return, you have encountered an error.
+			err := proto.Run(p, rw)
+			if err == nil {
+				p.log.Trace(fmt.Sprintf("Protocol %s/%d returned", proto.Name, proto.Version))
+				err = errProtocolReturned
+			} else if err != io.EOF {
+				p.log.Trace(fmt.Sprintf("Protocol %s/%d failed", proto.Name, proto.Version), "err", err)
+			}
+			p.protoErr <- err
+			p.wg.Done()
+		}()
+	}
+}
+```
+
+Go back and look at the **readLoop** method. This method is also an infinite loop. Call p.rw to read an Msg (this rw is actually the object of the frameRLPx mentioned earlier, that is, the object after the frame is divided. Then the corresponding processing is performed according to the type of Msg, if the type of Msg is the protocol of the internal running Type. Then send it to the proto.in queue of the corresponding protocol.
+
+```go
+func (p *Peer) readLoop(errc chan<- error) {
+	defer p.wg.Done()
+	for {
+		msg, err := p.rw.ReadMsg()
+		if err != nil {
+			errc <- err
+			return
+		}
+		msg.ReceivedAt = time.Now()
+		if err = p.handle(msg); err != nil {
+			errc <- err
+			return
+		}
+	}
+}
+
+
+func (p *Peer) handle(msg Msg) error {
+	switch {
+	case msg.Code == pingMsg:
+		msg.Discard()
+		go SendItems(p.rw, pongMsg)
+	case msg.Code == discMsg:
+		var reason [1]DiscReason
+		// This is the last message. We don't need to discard or
+		// check errors because, the connection will be closed after it.
+		rlp.Decode(msg.Payload, &reason)
+		return reason[0]
+	case msg.Code < baseProtocolLength:
+		// ignore other base protocol messages
+		return msg.Discard()
+	default:
+		// it's a subprotocol message
+		proto, err := p.getProto(msg.Code)
+		if err != nil {
+			return fmt.Errorf("msg code out of range: %v", msg.Code)
+		}
+		select {
+		case proto.in <- msg:
+			return nil
+		case <-p.closed:
+			return io.EOF
+		}
+	}
+	return nil
+}
+```
+
+Take a look at **pingLoop**. This method is very simple. It is time to send a pingMsg message to the peer.
+
+```go
+func (p *Peer) pingLoop() {
+	ping := time.NewTimer(pingInterval)
+	defer p.wg.Done()
+	defer ping.Stop()
+	for {
+		select {
+		case <-ping.C:
+			if err := SendItems(p.rw, pingMsg); err != nil {
+				p.protoErr <- err
+				return
+			}
+			ping.Reset(pingInterval)
+		case <-p.closed:
+			return
+		}
+	}
+}
+```
+
+Finally, take a look at the read and write methods of protoRW. You can see that both reads and writes are blocking.
+
+```go
+func (rw *protoRW) WriteMsg(msg Msg) (err error) {
+	if msg.Code >= rw.Length {
+		return newPeerError(errInvalidMsgCode, "not handled")
+	}
+	msg.Code += rw.offset
+	select {
+	case <-rw.wstart:  // Wait until the write is executable. Is this for multi-threaded control?
+		err = rw.w.WriteMsg(msg)
+		// Report write status back to Peer.run. It will initiate
+		// shutdown if the error is non-nil and unblock the next write
+		// otherwise. The calling protocol code should exit for errors
+		// as well but we don't want to rely on that.
+		rw.werr <- err
+	case <-rw.closed:
+		err = fmt.Errorf("shutting down")
+	}
+	return err
+}
+
+func (rw *protoRW) ReadMsg() (Msg, error) {
+	select {
+	case msg := <-rw.in:
+		msg.Code -= rw.offset
+		return msg, nil
+	case <-rw.closed:
+		return Msg{}, io.EOF
+	}
+}
+```
