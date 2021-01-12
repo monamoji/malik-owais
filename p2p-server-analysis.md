@@ -277,4 +277,195 @@ func (srv *Server) SetupConn(fd net.Conn, flags connFlag, dialDest *discover.Nod
 	}
 	// This checkpoint is actually sending the first parameter to the queue specified by the second parameter. Then receive the return message from c.cout. Is a synchronous method.
 	// As for this, the subsequent operation just checks if the connection is legal and returns.
-	if err := srv.checkpoint(c, srv.posthandshake); er
+	if err := srv.checkpoint(c, srv.posthandshake); err != nil {
+		clog.Trace("Rejected peer before protocol handshake", "err", err)
+		c.close(err)
+		return
+	}
+	// Run the protocol handshake
+	phs, err := c.doProtoHandshake(srv.ourHandshake)
+	if err != nil {
+		clog.Trace("Failed proto handshake", "err", err)
+		c.close(err)
+		return
+	}
+	if phs.ID != c.id {
+		clog.Trace("Wrong devp2p handshake identity", "err", phs.ID)
+		c.close(DiscUnexpectedIdentity)
+		return
+	}
+	c.caps, c.name = phs.Caps, phs.Name
+	// The two handshakes have been completed here. Send c to the addpeer queue. This connection is handled when the queue is processed in the background.
+	if err := srv.checkpoint(c, srv.addpeer); err != nil {
+		clog.Trace("Rejected peer", "err", err)
+		c.close(err)
+		return
+	}
+	// If the checks completed successfully, runPeer has now been
+	// launched by run.
+}
+```
+
+The process mentioned above is the process of listenLoop, and listenLoop is mainly used to receive external active connecters. There are also cases where the node needs to initiate a connection to connect to the external node. And the process of processing the checkpoint queue information just above. This part of the code is in the goroutine of server.run
+
+```go
+func (srv *Server) run(dialstate dialer) {
+	defer srv.loopWG.Done()
+	var (
+		peers        = make(map[discover.NodeID]*Peer)
+		trusted      = make(map[discover.NodeID]bool, len(srv.TrustedNodes))
+		taskdone     = make(chan task, maxActiveDialTasks)
+		runningTasks []task
+		queuedTasks  []task // tasks that can't run yet
+	)
+	// Put trusted nodes into a map to speed up checks.
+	// Trusted peers are loaded on startup and cannot be
+	// modified while the server is running.
+	for _, n := range srv.TrustedNodes {
+		trusted[n.ID] = true
+	}
+
+	// removes t from runningTasks
+	delTask := func(t task) {
+		for i := range runningTasks {
+			if runningTasks[i] == t {
+				runningTasks = append(runningTasks[:i], runningTasks[i+1:]...)
+				break
+			}
+		}
+	}
+	// starts until max number of active tasks is satisfied
+	// The number of nodes that started to connect at the same time is 16. Traverse the runningTasks queue and start these tasks.
+	startTasks := func(ts []task) (rest []task) {
+		i := 0
+		for ; len(runningTasks) < maxActiveDialTasks && i < len(ts); i++ {
+			t := ts[i]
+			log.Trace("New dial task", "task", t)
+			go func() { t.Do(srv); taskdone <- t }()
+			runningTasks = append(runningTasks, t)
+		}
+		return ts[i:]
+	}
+	scheduleTasks := func() {
+		// Start from queue first.
+		// First call startTasks to start a part, and return the rest to queuedTasks.
+		queuedTasks = append(queuedTasks[:0], startTasks(queuedTasks)...)
+		// Query dialer for new tasks and start as many as possible now.
+		// Call newTasks to generate the task and try to start with startTasks. And put the queue that can't be started temporarily into the queuedTasks queue.
+		if len(runningTasks) < maxActiveDialTasks {
+			nt := dialstate.newTasks(len(runningTasks)+len(queuedTasks), peers, time.Now())
+			queuedTasks = append(queuedTasks, startTasks(nt)...)
+		}
+	}
+
+running:
+	for {
+		// Call dialstate.newTasks to generate a new task. And call startTasks to start a new task.
+		// If the dialTask has all been started, a sleep timeout task will be generated.
+		scheduleTasks()
+
+		select {
+		case <-srv.quit:
+			// The server was stopped. Run the cleanup logic.
+			break running
+		case n := <-srv.addstatic:
+			// This channel is used by AddPeer to add to the
+			// ephemeral static peer list. Add it to the dialer,
+			// it will keep the node connected.
+			log.Debug("Adding static node", "node", n)
+			dialstate.addStatic(n)
+		case n := <-srv.removestatic:
+			// This channel is used by RemovePeer to send a
+			// disconnect request to a peer and begin the
+			// stop keeping the node connected
+			log.Debug("Removing static node", "node", n)
+			dialstate.removeStatic(n)
+			if p, ok := peers[n.ID]; ok {
+				p.Disconnect(DiscRequested)
+			}
+		case op := <-srv.peerOp:
+			// This channel is used by Peers and PeerCount.
+			op(peers)
+			srv.peerOpDone <- struct{}{}
+		case t := <-taskdone:
+			// A task got done. Tell dialstate about it so it
+			// can update its state and remove it from the active
+			// tasks list.
+			log.Trace("Dial task done", "task", t)
+			dialstate.taskDone(t, time.Now())
+			delTask(t)
+		case c := <-srv.posthandshake:
+			// A connection has passed the encryption handshake so
+			// the remote identity is known (but hasn't been verified yet).
+			if trusted[c.id] {
+				// Ensure that the trusted flag is set before checking against MaxPeers.
+				c.flags |= trustedConn
+			}
+			// TODO: track in-progress inbound node IDs (pre-Peer) to avoid dialing them.
+			select {
+			case c.cont <- srv.encHandshakeChecks(peers, c):
+			case <-srv.quit:
+				break running
+			}
+		case c := <-srv.addpeer:
+			// At this point the connection is past the protocol handshake.
+			// Its capabilities are known and the remote identity is verified.
+			// After two handshakes, checkpoint is called to send the connection to the addpeer channel.
+			err := srv.protoHandshakeChecks(peers, c)
+			if err == nil {
+				// The handshakes are done and it passed all checks.
+				p := newPeer(c, srv.Protocols)
+				// If message events are enabled, pass the peerFeed
+				// to the peer
+				if srv.EnableMsgEvents {
+					p.events = &srv.peerFeed
+				}
+				name := truncateName(c.name)
+				log.Debug("Adding p2p peer", "id", c.id, "name", name, "addr", c.fd.RemoteAddr(), "peers", len(peers)+1)
+				peers[c.id] = p
+				go srv.runPeer(p)
+			}
+			// The dialer logic relies on the assumption that
+			// dial tasks complete after the peer has been added or
+			// discarded. Unblock the task last.
+			select {
+			case c.cont <- err:
+			case <-srv.quit:
+				break running
+			}
+		case pd := <-srv.delpeer:
+			// A peer disconnected.
+			d := common.PrettyDuration(mclock.Now() - pd.created)
+			pd.log.Debug("Removing p2p peer", "duration", d, "peers", len(peers)-1, "req", pd.requested, "err", pd.err)
+			delete(peers, pd.ID())
+		}
+	}
+
+	log.Trace("P2P networking is spinning down")
+
+	// Terminate discovery. If there is a running lookup it will terminate soon.
+	if srv.ntab != nil {
+		srv.ntab.Close()
+	}
+	if srv.DiscV5 != nil {
+		srv.DiscV5.Close()
+	}
+	// Disconnect all peers.
+	for _, p := range peers {
+		p.Disconnect(DiscQuitting)
+	}
+	// Wait for peers to shut down. Pending connections and tasks are
+	// not handled here and will terminate soon-ish because srv.quit
+	// is closed.
+	for len(peers) > 0 {
+		p := <-srv.delpeer
+		p.log.Trace("<-delpeer (spindown)", "remainingTasks", len(runningTasks))
+		delete(peers, p.ID())
+	}
+}
+```
+
+runPeer method
+
+```go
+// runPeer runs in its own goroutine for e
