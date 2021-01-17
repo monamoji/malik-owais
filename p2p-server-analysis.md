@@ -468,4 +468,38 @@ running:
 runPeer method
 
 ```go
-// runPeer runs in its own goroutine for e
+// runPeer runs in its own goroutine for each peer.
+// it waits until the Peer logic returns and removes
+// the peer.
+func (srv *Server) runPeer(p *Peer) {
+	if srv.newPeerHook != nil {
+		srv.newPeerHook(p)
+	}
+
+	// broadcast peer add
+	srv.peerFeed.Send(&PeerEvent{
+		Type: PeerEventTypeAdd,
+		Peer: p.ID(),
+	})
+
+	// run the protocol
+	remoteRequested, err := p.run()
+
+	// broadcast peer drop
+	srv.peerFeed.Send(&PeerEvent{
+		Type:  PeerEventTypeDrop,
+		Peer:  p.ID(),
+		Error: err.Error(),
+	})
+
+	// Note: run waits for existing peers to be sent on srv.delpeer
+	// before returning, so this send should not select on srv.quit.
+	srv.delpeer <- peerDrop{p, err, remoteRequested}
+}
+```
+
+Sum up:
+
+The main work done by the server object combines all the components described earlier. Use rlpx.go to handle encrypted links. Use discover to handle node discovery and lookups. Use dial to generate and connect the nodes that need to be connected. Use a peer object to handle each connection.
+
+The server started a listenLoop to listen for and receive new connections. Start a run goroutine to call dialstate to generate a new dial task and connect. Channels are used between goroutines for communication and cooperation.
