@@ -511,4 +511,55 @@ func (tab *Table) Resolve(targetID NodeID) *Node {
 	cl := tab.closest(hash, 1)
 	tab.mutex.Unlock()
 	if len(cl.entries) > 0 && cl.entries[0].ID == targetID {
-		retu
+		return cl.entries[0]
+	}
+	// Otherwise, do a network lookup.
+	result := tab.Lookup(targetID)
+	for _, n := range result {
+		if n.ID == targetID {
+			return n
+		}
+	}
+	return nil
+}
+
+// Lookup performs a network search for nodes close
+// to the given target. It approaches the target by querying
+// nodes that are closer to it on each iteration.
+// The given target does not need to be an actual node
+// identifier.
+func (tab *Table) Lookup(targetID NodeID) []*Node {
+	return tab.lookup(targetID, true)
+}
+```
+
+SetFallbackNodes method, this method sets the initial contact node. The table is empty and there are no known nodes in the database. These nodes can help connect to the network.
+
+```go
+// SetFallbackNodes sets the initial points of contact. These nodes
+// are used to connect to the network if the table is empty and there
+// are no known nodes in the database.
+func (tab *Table) SetFallbackNodes(nodes []*Node) error {
+	for _, n := range nodes {
+		if err := n.validateComplete(); err != nil {
+			return fmt.Errorf("bad bootstrap/fallback node %q (%v)", n, err)
+		}
+	}
+	tab.mutex.Lock()
+	tab.nursery = make([]*Node, 0, len(nodes))
+	for _, n := range nodes {
+		cpy := *n
+		// Recompute cpy.sha because the node might not have been
+		// created by NewNode or ParseNode.
+		cpy.sha = crypto.Keccak256Hash(n.ID[:])
+		tab.nursery = append(tab.nursery, &cpy)
+	}
+	tab.mutex.Unlock()
+	tab.refresh()
+	return nil
+}
+```
+
+### sum up
+
+In this way, the Kademlia protocol of the p2p network is over. Basically, it is implemented according to the paper. Udp for network communication. The database stores the linked nodes. Table implements the core of Kademlia. Find the node based on the XOR distance. Process of discovery and update of nodes.
