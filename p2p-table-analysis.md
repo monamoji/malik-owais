@@ -330,4 +330,185 @@ func (tab *Table) add(new *Node) {
 		oldest.contested = true
 		// Let go of the mutex so other goroutines can access
 		// the table while we ping the least recently active node.
-		tab.
+		tab.mutex.Unlock()
+		err := tab.ping(oldest.ID, oldest.addr())
+		tab.mutex.Lock()
+		oldest.contested = false
+		if err == nil {
+			// The node responded, don't replace it.
+			return
+		}
+	}
+	added := b.replace(new, oldest)
+	if added && tab.nodeAddedHook != nil {
+		tab.nodeAddedHook(new)
+	}
+}
+```
+
+The stuff method is simpler. Find the bucket that the corresponding node should insert. If the bucket is not full, then insert the bucket. Otherwise do nothing. Need to say something about the logdist () method. This method XORs the two values ​​and returns the highest-level subscript. For example logdist(101,010) = 3 logdist(100, 100) = 0 logdist(100,110) = 2
+
+```go
+// stuff adds nodes the table to the end of their corresponding bucket
+// if the bucket is not full. The caller must hold tab.mutex.
+func (tab *Table) stuff(nodes []*Node) {
+outer:
+	for _, n := range nodes {
+		if n.ID == tab.self.ID {
+			continue // don't add self
+		}
+		bucket := tab.buckets[logdist(tab.self.sha, n.sha)]
+		for i := range bucket.entries {
+			if bucket.entries[i].ID == n.ID {
+				continue outer // already in bucket
+			}
+		}
+		if len(bucket.entries) < bucketSize {
+			bucket.entries = append(bucket.entries, n)
+			if tab.nodeAddedHook != nil {
+				tab.nodeAddedHook(n)
+			}
+		}
+	}
+}
+```
+
+Take a look at the previous Lookup function. This function is used to query the information of a specified node. This function first gets all 16 nodes closest to this node from the local. Then send a request for findnode to all nodes. The bond definition is then processed for the return. Then return all the nodes.
+
+```go
+func (tab *Table) lookup(targetID NodeID, refreshIfEmpty bool) []*Node {
+	var (
+		target         = crypto.Keccak256Hash(targetID[:])
+		asked          = make(map[NodeID]bool)
+		seen           = make(map[NodeID]bool)
+		reply          = make(chan []*Node, alpha)
+		pendingQueries = 0
+		result         *nodesByDistance
+	)
+	// don't query further if we hit ourself.
+	// unlikely to happen often in practice.
+	asked[tab.self.ID] = true
+	// Will not ask ourselves
+	for {
+		tab.mutex.Lock()
+		// generate initial result set
+		result = tab.closest(target, bucketSize)
+		// Find the 16 nodes closest to the target
+		tab.mutex.Unlock()
+		if len(result.entries) > 0 || !refreshIfEmpty {
+			break
+		}
+		// The result set is empty, all nodes were dropped, refresh.
+		// We actually wait for the refresh to complete here. The very
+		// first query will hit this case and run the bootstrapping
+		// logic.
+		<-tab.refresh()
+		refreshIfEmpty = false
+	}
+
+	for {
+		// ask the alpha closest nodes that we haven't asked yet
+		// Here will be concurrent queries, each time 3 goroutine concurrency (controlled by the pendingQueries parameter)
+		// Each iteration will query the three nodes closest to the target in the result.。
+		for i := 0; i < len(result.entries) && pendingQueries < alpha; i++ {
+			n := result.entries[i]
+			if !asked[n.ID] { // If not queried, because this result.entries will be looped many times. So use this variable to control which ones have been processed.
+				asked[n.ID] = true
+				pendingQueries++
+				go func() {
+					// Find potential neighbors to bond with
+					r, err := tab.net.findnode(n.ID, n.addr(), targetID)
+					if err != nil {
+						// Bump the failure counter to detect and evacuate non-bonded entries
+						fails := tab.db.findFails(n.ID) + 1
+						tab.db.updateFindFails(n.ID, fails)
+						log.Trace("Bumping findnode failure counter", "id", n.ID, "failcount", fails)
+
+						if fails >= maxFindnodeFailures {
+							log.Trace("Too many findnode failures, dropping", "id", n.ID, "failcount", fails)
+							tab.delete(n)
+						}
+					}
+					reply <- tab.bondall(r)
+				}()
+			}
+		}
+		if pendingQueries == 0 {
+			// we have asked all closest nodes, stop the search
+			break
+		}
+		// wait for the next reply
+		for _, n := range <-reply {
+			if n != nil && !seen[n.ID] { // Because different distant nodes may return the same node. All use sheen[] to do the weighting.
+				seen[n.ID] = true
+				// The point to note in this place is that the result of the search will be added to the result queue. In other words, this is a process of loop lookup, as long as the result is constantly adding new nodes. This loop will not terminate
+				result.push(n, bucketSize)
+			}
+		}
+		pendingQueries--
+	}
+	return result.entries
+}
+
+// closest returns the n nodes in the table that are closest to the
+// given id. The caller must hold tab.mutex.
+func (tab *Table) closest(target common.Hash, nresults int) *nodesByDistance {
+	// This is a very wasteful way to find the closest nodes but
+	// obviously correct. I believe that tree-based buckets would make
+	// this easier to implement efficiently.
+	close := &nodesByDistance{target: target}
+	for _, b := range tab.buckets {
+		for _, n := range b.entries {
+			close.push(n, nresults)
+		}
+	}
+	return close
+}
+```
+
+The result.push method, which sorts the distances of all nodes for the target. The insertion order of the new nodes is determined in a near-to-far manner. (The queue will contain a maximum of 16 elements). This will cause the elements in the queue to be closer to the target. Relatively far away will be kicked out of the queue.
+
+```go
+// nodesByDistance is a list of nodes, ordered by
+// distance to target.
+type nodesByDistance struct {
+	entries []*Node
+	target  common.Hash
+}
+
+// push adds the given node to the list, keeping the total size below maxElems.
+func (h *nodesByDistance) push(n *Node, maxElems int) {
+	ix := sort.Search(len(h.entries), func(i int) bool {
+		return distcmp(h.target, h.entries[i].sha, n.sha) > 0
+	})
+	if len(h.entries) < maxElems {
+		h.entries = append(h.entries, n)
+	}
+	if ix == len(h.entries) {
+		// farther away than all nodes we already have.
+		// if there was room for it, the node is now the last element.
+	} else {
+		// slide existing entries down to make room
+		// this will overwrite the entry we just appended.
+		copy(h.entries[ix+1:], h.entries[ix:])
+		h.entries[ix] = n
+	}
+}
+```
+
+### Some methods exported by table.go
+
+Resolve method and Lookup method
+
+```go
+// Resolve searches for a specific node with the given ID.
+// It returns nil if the node could not be found.
+func (tab *Table) Resolve(targetID NodeID) *Node {
+	// If the node is present in the local table, no
+	// network interaction is required.
+	hash := crypto.Keccak256Hash(targetID[:])
+	tab.mutex.Lock()
+	cl := tab.closest(hash, 1)
+	tab.mutex.Unlock()
+	if len(cl.entries) > 0 && cl.entries[0].ID == targetID {
+		retu
