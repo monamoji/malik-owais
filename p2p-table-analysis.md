@@ -162,4 +162,172 @@ func (tab *Table) doRefresh(done chan struct{}) {
 	//tab.nursery is the seed node specified on the command line.
 	//At the beginning of the startup. The value of tab.nursery is built into the code. This is worthwhile.
 	//$GOPATH/src/github.com/ethereum/go-ethereum/mobile/params.go
-	//There is a dead val
+	//There is a dead value written here. This value is written by the SetFallbackNodes method. This method will be analyzed later.
+	//This will be a two-way pingpong exchange. Then store the results in the database.
+	seeds = tab.bondall(append(seeds, tab.nursery...))
+
+	if len(seeds) == 0 { // No seed nodes are found and may need to wait for the next refresh.
+		log.Debug("No discv4 seed nodes found")
+	}
+	for _, n := range seeds {
+		age := log.Lazy{Fn: func() time.Duration { return time.Since(tab.db.lastPong(n.ID)) }}
+		log.Trace("Found seed node in database", "id", n.ID, "addr", n.addr(), "age", age)
+	}
+	tab.mutex.Lock()
+	// This method adds all bonded seed to the bucket (provided the bucket is not full)
+	tab.stuff(seeds)
+	tab.mutex.Unlock()
+
+	// Finally, do a self lookup to fill up the buckets.
+	tab.lookup(tab.self.ID, false) // With a seed node. Then find yourself to fill the buckets.
+}
+```
+
+The bondall method, which is a multithreaded call to the bond method.
+
+```go
+// bondall bonds with all given nodes concurrently and returns
+// those nodes for which bonding has probably succeeded.
+func (tab *Table) bondall(nodes []*Node) (result []*Node) {
+	rc := make(chan *Node, len(nodes))
+	for i := range nodes {
+		go func(n *Node) {
+			nn, _ := tab.bond(false, n.ID, n.addr(), uint16(n.TCP))
+			rc <- nn
+		}(nodes[i])
+	}
+	for range nodes {
+		if n := <-rc; n != nil {
+			result = append(result, n)
+		}
+	}
+	return result
+}
+```
+
+Bond method. Remember in udp.go. This method may also be called when we receive a ping method.
+
+```go
+// bond ensures the local node has a bond with the given remote node.
+// It also attempts to insert the node into the table if bonding succeeds.
+// The caller must not hold tab.mutex.
+// A bond is must be established before sending findnode requests.
+// Both sides must have completed a ping/pong exchange for a bond to
+// exist. The total number of active bonding processes is limited in
+// order to restrain network use.
+// bond is meant to operate idempotently in that bonding with a remote
+// node which still remembers a previously established bond will work.
+// The remote node will simply not send a ping back, causing waitping
+// to time out.
+// If pinged is true, the remote node has just pinged us and one half
+// of the process can be skipped.
+func (tab *Table) bond(pinged bool, id NodeID, addr *net.UDPAddr, tcpPort uint16) (*Node, error) {
+	if id == tab.self.ID {
+		return nil, errors.New("is self")
+	}
+	// Retrieve a previously known node and any recent findnode failures
+	node, fails := tab.db.node(id), 0
+	if node != nil {
+		fails = tab.db.findFails(id)
+	}
+	// If the node is unknown (non-bonded) or failed (remotely unknown), bond from scratch
+	var result error
+	age := time.Since(tab.db.lastPong(id))
+	if node == nil || fails > 0 || age > nodeDBNodeExpiration {
+		// If the database does not have this node. Or the number of errors is greater than 0 or the node times out.
+		log.Trace("Starting bonding ping/pong", "id", id, "known", node != nil, "failcount", fails, "age", age)
+
+		tab.bondmu.Lock()
+		w := tab.bonding[id]
+		if w != nil {
+			// Wait for an existing bonding process to complete.
+			tab.bondmu.Unlock()
+			<-w.done
+		} else {
+			// Register a new bonding process.
+			w = &bondproc{done: make(chan struct{})}
+			tab.bonding[id] = w
+			tab.bondmu.Unlock()
+			// Do the ping/pong. The result goes into w.
+			tab.pingpong(w, pinged, id, addr, tcpPort)
+			// Unregister the process after it's done.
+			tab.bondmu.Lock()
+			delete(tab.bonding, id)
+			tab.bondmu.Unlock()
+		}
+		// Retrieve the bonding results
+		result = w.err
+		if result == nil {
+			node = w.n
+		}
+	}
+	if node != nil {
+		// Add the node to the table even if the bonding ping/pong
+		// fails. It will be relaced quickly if it continues to be
+		// unresponsive.
+		// This method is more important. If the corresponding bucket has space, the buckets will be inserted directly. If the buckets are full. The ping operation will be used to test the nodes in the bucket to try to make room.
+		tab.add(node)
+		tab.db.updateFindFails(id, 0)
+	}
+	return node, result
+}
+```
+
+pingpong method
+
+```go
+func (tab *Table) pingpong(w *bondproc, pinged bool, id NodeID, addr *net.UDPAddr, tcpPort uint16) {
+	// Request a bonding slot to limit network usage
+	<-tab.bondslots
+	defer func() { tab.bondslots <- struct{}{} }()
+
+	// Ping the remote side and wait for a pong.
+	if w.err = tab.ping(id, addr); w.err != nil {
+		close(w.done)
+		return
+	}
+	//This is set to true when udp receives a ping message. At this time we have received the ping message from the other party.
+	// Then we will wait for the ping message differently. Otherwise, you need to wait for the ping message sent by the other party (we initiate the ping message actively).
+	if !pinged {
+		// Give the remote node a chance to ping us before we start
+		// sending findnode requests. If they still remember us,
+		// waitping will simply time out.
+		tab.net.waitping(id)
+	}
+	// Bonding succeeded, update the node database.
+	// Complete the bond process. Insert the node into the database. The database operation is done here. The operation of the bucket is done in tab.add. Buckets are memory operations. The database is a persistent seeds node. Used to speed up the startup process.
+	w.n = NewNode(id, addr.IP, uint16(addr.Port), tcpPort)
+	tab.db.updateNode(w.n)
+	close(w.done)
+}
+```
+
+tab.add method
+
+```go
+// add attempts to add the given node its corresponding bucket. If the
+// bucket has space available, adding the node succeeds immediately.
+// Otherwise, the node is added if the least recently active node in
+// the bucket does not respond to a ping packet.
+// The caller must not hold tab.mutex.
+func (tab *Table) add(new *Node) {
+	b := tab.buckets[logdist(tab.self.sha, new.sha)]
+	tab.mutex.Lock()
+	defer tab.mutex.Unlock()
+	if b.bump(new) { // If the node exists. Then update its value. Then quit.
+		return
+	}
+	var oldest *Node
+	if len(b.entries) == bucketSize {
+		oldest = b.entries[bucketSize-1]
+		if oldest.contested {
+			// The node is already being replaced, don't attempt
+			// to replace it.
+			// If another goroutine is testing this node. Then cancel the replacement and exit directly.
+			// Because the ping time is longer. So this time is not locked. This state is used to identify this situation.
+			return
+		}
+		oldest.contested = true
+		// Let go of the mutex so other goroutines can access
+		// the table while we ping the least recently active node.
+		tab.
