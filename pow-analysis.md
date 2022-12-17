@@ -287,4 +287,179 @@ func (ethash *Ethash) verifyHeaderWorker(chain consensus.ChainReader, headers []
 VerifyUncles is used for verification of the unblock. Similar to the check block header, the unchecked block check returns directly in the ModeFullFake mode. Get all the uncle blocks, then traverse the checksum, the checksum will terminate, or the checksum will return.
 
 ```go
-func (ethash *Ethash) Veri
+func (ethash *Ethash) VerifyUncles(chain consensus.ChainReader, block *types.Block) error {
+	// If we're running a full engine faking, accept any input as valid
+	if ethash.config.PowMode == ModeFullFake {
+		return nil
+	}
+	// Verify that there are at most 2 uncles included in this block
+	if len(block.Uncles()) > maxUncles {
+		return errTooManyUncles
+	}
+	// Collecting uncles and their ancestors
+	uncles, ancestors := set.New(), make(map[common.Hash]*types.Header)
+
+	number, parent := block.NumberU64()-1, block.ParentHash()
+	for i := 0; i < 7; i++ {
+		ancestor := chain.GetBlock(parent, number)
+		if ancestor == nil {
+			break
+		}
+		ancestors[ancestor.Hash()] = ancestor.Header()
+		for _, uncle := range ancestor.Uncles() {
+			uncles.Add(uncle.Hash())
+		}
+		parent, number = ancestor.ParentHash(), number-1
+	}
+	ancestors[block.Hash()] = block.Header()
+	uncles.Add(block.Hash())
+
+	// Verify each of the unblocks
+	for _, uncle := range block.Uncles() {
+		// Make sure every uncle is rewarded only once
+		hash := uncle.Hash()
+		if uncles.Has(hash) {
+			return errDuplicateUncle
+		}
+		uncles.Add(hash)
+
+		// Make sure the uncle has a valid ancestry
+		if ancestors[hash] != nil {
+			return errUncleIsAncestor
+		}
+		if ancestors[uncle.ParentHash] == nil || uncle.ParentHash == block.ParentHash() {
+			return errDanglingUncle
+		}
+		if err := ethash.verifyHeader(chain, uncle, ancestors[uncle.ParentHash], true, true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+```
+
+Prepare implements the consensus engine's Prepare interface, which is used to fill the difficulty field of the block header to conform to the ethash protocol. This change is online.
+
+```go
+func (ethash *Ethash) Prepare(chain consensus.ChainReader, header *types.Header) error {
+	parent := chain.GetHeader(header.ParentHash, header.Number.Uint64()-1)
+	if parent == nil {
+		return consensus.ErrUnknownAncestor
+	}
+	header.Difficulty = ethash.CalcDifficulty(chain, header.Time.Uint64(), parent)
+	return nil
+}
+```
+
+Finalize implements the Finalize interface of the consensus engine, rewards digging into block accounts and unblocked accounts, and populates the value of the root of the state tree. And return to the new block.
+
+```go
+func (ethash *Ethash) Finalize(chain consensus.ChainReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, receipts []*types.Receipt) (*types.Block, error) {
+	// Accumulate any block and uncle rewards and commit the final state root
+	accumulateRewards(chain.Config(), state, header, uncles)
+	header.Root = state.IntermediateRoot(chain.Config().IsEIP158(header.Number))
+
+	// Header seems complete, assemble into a block and return
+	return types.NewBlock(header, txs, uncles, receipts), nil
+}
+
+func accumulateRewards(config *params.ChainConfig, state *state.StateDB, header *types.Header, uncles []*types.Header) {
+	// Select the correct block reward based on chain progression
+	blockReward := FrontierBlockReward
+	if config.IsByzantium(header.Number) {
+		blockReward = ByzantiumBlockReward
+	}
+	// Accumulate the rewards for the miner and any included uncles
+	reward := new(big.Int).Set(blockReward)
+	r := new(big.Int)
+	// Reward a bad block account块账户
+	for _, uncle := range uncles {
+		r.Add(uncle.Number, big8)
+		r.Sub(r, header.Number)
+		r.Mul(r, blockReward)
+		r.Div(r, big8)
+		state.AddBalance(uncle.Coinbase, r)
+
+		r.Div(blockReward, big32)
+		reward.Add(reward, r)
+	}
+	// Reward the coinbase account
+	state.AddBalance(header.Coinbase, reward)
+}
+```
+
+#### Seal function implementation
+
+In the CPU mining part, the core function of CpuAgent calls the Seal function when performing the mining operation. The Seal function attempts to find a nonce value that satisfies the block difficulty. In ModeFake and ModeFullFake mode, it returns quickly and takes the nonce value directly to 0. In shared PoW mode, use the shared Seal function. Turn on threads goroutine for mining (find the qualified nonce value).
+
+```go
+// Seal implements consensus.Engine, attempting to find a nonce that satisfies
+// the block's difficulty requirements.
+func (ethash *Ethash) Seal(chain consensus.ChainReader, block *types.Block, stop <-chan struct{}) (*types.Block, error) {
+	// In ModeFake and ModeFullFake mode, it returns quickly and takes the nonce value directly to 0.
+	if ethash.config.PowMode == ModeFake || ethash.config.PowMode == ModeFullFake {
+		header := block.Header()
+		header.Nonce, header.MixDigest = types.BlockNonce{}, common.Hash{}
+		return block.WithSeal(header), nil
+	}
+	// In shared PoW mode, use the shared Seal function.
+	if ethash.shared != nil {
+		return ethash.shared.Seal(chain, block, stop)
+	}
+	// Create a runner and the multiple search threads it directs
+	abort := make(chan struct{})
+	found := make(chan *types.Block)
+
+	ethash.lock.Lock()
+	threads := ethash.threads
+	if ethash.rand == nil {
+		seed, err := crand.Int(crand.Reader, big.NewInt(math.MaxInt64))
+		if err != nil {
+			ethash.lock.Unlock()
+			return nil, err
+		}
+		ethash.rand = rand.New(rand.NewSource(seed.Int64()))
+	}
+	ethash.lock.Unlock()
+	if threads == 0 {
+		threads = runtime.NumCPU()
+	}
+	if threads < 0 {
+		threads = 0 // Allows disabling local mining without extra logic around local/remote
+	}
+	var pend sync.WaitGroup
+	for i := 0; i < threads; i++ {
+		pend.Add(1)
+		go func(id int, nonce uint64) {
+			defer pend.Done()
+			ethash.mine(block, id, nonce, abort, found)
+		}(i, uint64(ethash.rand.Int63()))
+	}
+	// Wait until sealing is terminated or a nonce is found
+	var result *types.Block
+	select {
+	case <-stop:
+		// Outside abort, stop all miner threads
+		close(abort)
+	case result = <-found:
+		// One of the threads found a block, abort all others
+		close(abort)
+	case <-ethash.update:
+		// Thread count was changed on user request, restart
+		close(abort)
+		pend.Wait()
+		return ethash.Seal(chain, block, stop)
+	}
+	// Wait for all mining goroutine returns
+	pend.Wait()
+	return result, nil
+}
+```
+
+Mine is a true function for finding the nonce value, it traverses to find the nonce value and compares the PoW value to the target value. The principle can be briefly described as follows:
+
+```go
+								RAND(h, n)  <=  M / d
+```
+
+Here M represents a very large number, here is 2^256-1; d represents the Header member Difficulty. RAND() is a concept function that represents a series of complex operations and ultimately produces a random number. This function consists of two basic parameters: h is the hash of the Header (Header.HashNoNonce()), 
