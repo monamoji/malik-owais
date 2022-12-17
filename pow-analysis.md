@@ -462,4 +462,147 @@ Mine is a true function for finding the nonce value, it traverses to find the no
 								RAND(h, n)  <=  M / d
 ```
 
-Here M represents a very large number, here is 2^256-1; d represents the Header member Difficulty. RAND() is a concept function that represents a series of complex operations and ultimately produces a random number. This function consists of two basic parameters: h is the hash of the Header (Header.HashNoNonce()), 
+Here M represents a very large number, here is 2^256-1; d represents the Header member Difficulty. RAND() is a concept function that represents a series of complex operations and ultimately produces a random number. This function consists of two basic parameters: h is the hash of the Header (Header.HashNoNonce()), and n is the Header member Nonce. The whole relation can be roughly understood as trying to find a number in a way that does not exceed M in the maximum. If the number meets the condition (<=M/d), then Seal() is considered successful. It can be known from the above formula that M is constant, and the larger d is, the smaller the range is. So as the difficulty increases, the difficulty of dig out the block is also increasing.
+
+```go
+func (ethash *Ethash) mine(block *types.Block, id int, seed uint64, abort chan struct{}, found chan *types.Block) {
+	// Get some data from the block header
+	var (
+		header  = block.Header()
+		hash    = header.HashNoNonce().Bytes()
+		// target is the upper limit of the PoW found target = maxUint256/Difficulty
+		// where maxUint256 = 2^256-1 Difficulty is the difficulty value
+		target  = new(big.Int).Div(maxUint256, header.Difficulty)
+		number  = header.Number.Uint64()
+		dataset = ethash.dataset(number)
+	)
+	// Try to find a nonce value until it terminates or finds the target value
+	var (
+		attempts = int64(0)
+		nonce    = seed
+	)
+	logger := log.New("miner", id)
+	logger.Trace("Started ethash search for new nonces", "seed", seed)
+search:
+	for {
+		select {
+		case <-abort:
+			// stop mining
+			logger.Trace("Ethash nonce search aborted", "attempts", nonce-seed)
+			ethash.hashrate.Mark(attempts)
+			break search
+
+		default:
+			// It is not necessary to update the hash rate at every nonce value, and update the hash rate every 2^x nonce values.
+			attempts++
+			if (attempts % (1 << 15)) == 0 {
+				ethash.hashrate.Mark(attempts)
+				attempts = 0
+			}
+			// Calculate the PoW value with this nonce
+			digest, result := hashimotoFull(dataset.dataset, hash, nonce)
+			// The calculated result is compared with the target value, and if it is less than the target value, the search is successful.
+			if new(big.Int).SetBytes(result).Cmp(target) <= 0 {
+				// Find the nonce value, update the block header
+				header = types.CopyHeader(header)
+				header.Nonce = types.EncodeNonce(nonce)
+				header.MixDigest = common.BytesToHash(digest)
+
+				// Pack the block header and return
+				select {
+				// WithSeal Replace the new block header with the old block header
+				case found <- block.WithSeal(header):
+					logger.Trace("Ethash nonce found and reported", "attempts", nonce-seed, "nonce", nonce)
+				case <-abort:
+					logger.Trace("Ethash nonce found but discarded", "attempts", nonce-seed, "nonce", nonce)
+				}
+				break search
+			}
+			nonce++
+		}
+	}
+	// Datasets are unmapped in a finalizer. Ensure that the dataset stays live
+	// during sealing so it's not unmapped while being read.
+	runtime.KeepAlive(dataset)
+}
+```
+
+The appeal function calls the hashimotoFull function to calculate the value of the PoW.
+
+```go
+func hashimotoFull(dataset []uint32, hash []byte, nonce uint64) ([]byte, []byte) {
+	lookup := func(index uint32) []uint32 {
+		offset := index * hashWords
+		return dataset[offset : offset+hashWords]
+	}
+	return hashimoto(hash, nonce, uint64(len(dataset))*4, lookup)
+}
+```
+
+Hashimoto is used to aggregate data to produce specific back-end hash and nonce values.
+
+![images：https://blog.csdn.net/metal1/article/details/79682636](picture/pow_hashimoto.png)
+Briefly describe the part of the process:
+
+- First, Hashimoto () function into the reference @Hash and @Nonce combined into one array of 40 bytes long, it takes a SHA-512 hash value SEED name, a length of 64 bytes.。
+- Then, convert seed[] into an array mix[] with uint32 as the element, note that a uint32 number is equal to 4 bytes, so seed[] can only be converted to 16 uint32 numbers, and the mix[] array is 32 in length, so this time The mix[] array is equal to each other.
+- Next, the lookup() function comes up. With a loop, constantly call lookup() to extract the uint32 element type array from the external dataset, and mix the unknown data into the mix[] array. The number of loops can be adjusted with parameters and is currently set to 64 times. In each loop, the change generates the parameter index, so that each time the array that is called by the lookup() function is different. The way to mix data here is a vector-like XOR operation from the FNV algorithm. After the data to be confusing is completed, you get a basically unrecognizable mix[], a length of 32 uint32 array. At this time, it is folded (compressed) into a uint32 array whose length is reduced to 1/4 of the original length, and the folding operation method is still from the FNV algorithm.
+- Finally, the collapsed mix[] is directly converted into a byte array of length 8 by a uint32 array of length 8. This is the return value @digest; the previous seed[] array is merged with the digest and the SHA- is taken again. A 256 hash value, resulting in a byte array of length 32, which is the return value @result . (Transferred from https://blog.csdn.net/metal1/article/details/79682636 ))
+
+```go
+func hashimoto(hash []byte, nonce uint64, size uint64, lookup func(index uint32) []uint32) ([]byte, []byte) {
+	// Calculate the number of theoretical rows
+	rows := uint32(size / mixBytes)
+
+	// Replace header+nonce into a 64-byte seed
+	seed := make([]byte, 40)
+	copy(seed, hash)
+	binary.LittleEndian.PutUint64(seed[32:], nonce)
+
+	seed = crypto.Keccak512(seed)
+	seedHead := binary.LittleEndian.Uint32(seed)
+
+	// Convert seed[] to an array with uint32 as an element mix[]
+	mix := make([]uint32, mixBytes/4)
+	for i := 0; i < len(mix); i++ {
+		mix[i] = binary.LittleEndian.Uint32(seed[i%16*4:])
+	}
+	// Mixing unknown data into the mix[] array
+	temp := make([]uint32, len(mix))
+
+	for i := 0; i < loopAccesses; i++ {
+		parent := fnv(uint32(i)^seedHead, mix[i%len(mix)]) % rows
+		for j := uint32(0); j < mixBytes/hashBytes; j++ {
+			copy(temp[j*hashWords:], lookup(2*parent+j))
+		}
+		fnvHash(mix, temp)
+	}
+	// Compressed into a uint32 array whose length is reduced to 1/4 of the original length
+	for i := 0; i < len(mix); i += 4 {
+		mix[i/4] = fnv(fnv(fnv(mix[i], mix[i+1]), mix[i+2]), mix[i+3])
+	}
+	mix = mix[:len(mix)/4]
+
+	digest := make([]byte, common.HashLength)
+	for i, val := range mix {
+		binary.LittleEndian.PutUint32(digest[i*4:], val)
+	}
+	return digest, crypto.Keccak256(append(seed, digest...))
+}
+```
+
+#### VerifySeal function analysis
+
+VerifySeal is used to verify that the nonce value of the block meets the PoW difficulty requirements.
+
+```go
+func (ethash *Ethash) VerifySeal(chain consensus.ChainReader, header *types.Header) error {
+	// ModeFake and ModeFullFake modes are not verified and are directly verified.
+	if ethash.config.PowMode == ModeFake || ethash.config.PowMode == ModeFullFake {
+		time.Sleep(ethash.fakeDelay)
+		if ethash.fakeFail == header.Number.Uint64() {
+			return errInvalidPoW
+		}
+		return nil
+	}
+	// shared: 
