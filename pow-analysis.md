@@ -93,4 +93,198 @@ func (ethash *Ethash) VerifyHeader(chain consensus.ChainReader, header *types.He
 	if ethash.config.PowMode == ModeFullFake {
 		return nil
 	}
-	// If the header is known, it does not need to be verified and returns direc
+	// If the header is known, it does not need to be verified and returns directly.
+	number := header.Number.Uint64()
+	if chain.GetHeader(header.Hash(), number) != nil {
+		return nil
+	}
+	parent := chain.GetHeader(header.ParentHash, number-1)
+	if parent == nil {  // Failed to get parent node
+		return consensus.ErrUnknownAncestor
+	}
+	// Further header verification
+	return ethash.verifyHeader(chain, header, parent, false, seal)
+}
+```
+
+Then look at the implementation of verifyHeader,
+
+```go
+func (ethash *Ethash) verifyHeader(chain consensus.ChainReader, header, parent *types.Header, uncle bool, seal bool) error {
+	// Ensure that the extra data segment has a reasonable length
+	if uint64(len(header.Extra)) > params.MaximumExtraDataSize {
+		return fmt.Errorf("extra-data too long: %d > %d", len(header.Extra), params.MaximumExtraDataSize)
+	}
+	// Check timestamp
+	if uncle {
+		if header.Time.Cmp(math.MaxBig256) > 0 {
+			return errLargeBlockTime
+		}
+	} else {
+		if header.Time.Cmp(big.NewInt(time.Now().Add(allowedFutureBlockTime).Unix())) > 0 {
+			return consensus.ErrFutureBlock
+		}
+	}
+	if header.Time.Cmp(parent.Time) <= 0 {
+		return errZeroBlockTime
+	}
+	// The difficulty of the block is checked based on the timestamp and the difficulty of the parent block.
+	expected := ethash.CalcDifficulty(chain, header.Time.Uint64(), parent)
+
+	if expected.Cmp(header.Difficulty) != 0 {
+		return fmt.Errorf("invalid difficulty: have %v, want %v", header.Difficulty, expected)
+	}
+	// check gas limit <= 2^63-1
+	cap := uint64(0x7fffffffffffffff)
+	if header.GasLimit > cap {
+		return fmt.Errorf("invalid gasLimit: have %v, max %v", header.GasLimit, cap)
+	}
+	// check gasUsed <= gasLimit
+	if header.GasUsed > header.GasLimit {
+		return fmt.Errorf("invalid gasUsed: have %d, gasLimit %d", header.GasUsed, header.GasLimit)
+	}
+
+	// gas limit Is it within the allowable range?
+	diff := int64(parent.GasLimit) - int64(header.GasLimit)
+	if diff < 0 {
+		diff *= -1
+	}
+	limit := parent.GasLimit / params.GasLimitBoundDivisor
+
+	if uint64(diff) >= limit || header.GasLimit < params.MinGasLimit {
+		return fmt.Errorf("invalid gas limit: have %d, want %d += %d", header.GasLimit, parent.GasLimit, limit)
+	}
+	// The check block number should be the parent block block number +1
+	if diff := new(big.Int).Sub(header.Number, parent.Number); diff.Cmp(big.NewInt(1)) != 0 {
+		return consensus.ErrInvalidNumber
+	}
+	// Verify that a particular block meets the requirements
+	if seal {
+		if err := ethash.VerifySeal(chain, header); err != nil {
+			return err
+		}
+	}
+	// If all checks pass, verify the special field of the hard fork.
+	if err := misc.VerifyDAOHeaderExtraData(chain.Config(), header); err != nil {
+		return err
+	}
+	if err := misc.VerifyForkHashes(chain.Config(), header, uncle); err != nil {
+		return err
+	}
+	return nil
+}
+```
+
+Ethash calculates the difficulty of the next block through the CalcDifficulty function, and creates different difficulty calculation methods for the difficulty of different stages.
+
+```go
+func (ethash *Ethash) CalcDifficulty(chain consensus.ChainReader, time uint64, parent *types.Header) *big.Int {
+	return CalcDifficulty(chain.Config(), time, parent)
+}
+
+func CalcDifficulty(config *params.ChainConfig, time uint64, parent *types.Header) *big.Int {
+	next := new(big.Int).Add(parent.Number, big1)
+	switch {
+	case config.IsByzantium(next):
+		return calcDifficultyByzantium(time, parent)
+	case config.IsHomestead(next):
+		return calcDifficultyHomestead(time, parent)
+	default:
+		return calcDifficultyFrontier(time, parent)
+	}
+}
+```
+
+VerifyHeaders is similar to VerifyHeader except that VerifyHeaders performs bulk check operations. Create multiple goroutines to perform validation operations, and then create a goroutine for assignment control task assignment and result acquisition. Finally return a result channel
+
+```go
+func (ethash *Ethash) VerifyHeaders(chain consensus.ChainReader, headers []*types.Header, seals []bool) (chan<- struct{}, <-chan error) {
+	// If we're running a full engine faking, accept any input as valid
+	if ethash.config.PowMode == ModeFullFake || len(headers) == 0 {
+		abort, results := make(chan struct{}), make(chan error, len(headers))
+		for i := 0; i < len(headers); i++ {
+			results <- nil
+		}
+		return abort, results
+	}
+
+	// Spawn as many workers as allowed threads
+	workers := runtime.GOMAXPROCS(0)
+	if len(headers) < workers {
+		workers = len(headers)
+	}
+
+	// Create a task channel and spawn the verifiers
+	var (
+		inputs = make(chan int)
+		done   = make(chan int, workers)
+		errors = make([]error, len(headers))
+		abort  = make(chan struct{})
+	)
+	// Generate workers goroutine for check head
+	for i := 0; i < workers; i++ {
+		go func() {
+			for index := range inputs {
+				errors[index] = ethash.verifyHeaderWorker(chain, headers, seals, index)
+				done <- index
+			}
+		}()
+	}
+
+	errorsOut := make(chan error, len(headers))
+	// goroutine Used to send tasks to workers goroutine
+	go func() {
+		defer close(inputs)
+		var (
+			in, out = 0, 0
+			checked = make([]bool, len(headers))
+			inputs  = inputs
+		)
+		for {
+			select {
+			case inputs <- in:
+				if in++; in == len(headers) {
+					// Reached end of headers. Stop sending to workers.
+					inputs = nil
+				}
+			// Statistics and send an error message to errorsOut
+			case index := <-done:
+				for checked[index] = true; checked[out]; out++ {
+					errorsOut <- errors[out]
+					if out == len(headers)-1 {
+						return
+					}
+				}
+			case <-abort:
+				return
+			}
+		}
+	}()
+	return abort, errorsOut
+}
+```
+
+VerifyHeaders uses verifyHeaderWorker when checking a single block header. After the function gets the parent block, it calls verifyHeader to check it.
+
+```go
+func (ethash *Ethash) verifyHeaderWorker(chain consensus.ChainReader, headers []*types.Header, seals []bool, index int) error {
+	var parent *types.Header
+	if index == 0 {
+		parent = chain.GetHeader(headers[0].ParentHash, headers[0].Number.Uint64()-1)
+	} else if headers[index-1].Hash() == headers[index].ParentHash {
+		parent = headers[index-1]
+	}
+	if parent == nil {
+		return consensus.ErrUnknownAncestor
+	}
+	if chain.GetHeader(headers[index].Hash(), headers[index].Number.Uint64()) != nil {
+		return nil // known block
+	}
+	return ethash.verifyHeader(chain, headers[index], parent, false, seals[index])
+}
+```
+
+VerifyUncles is used for verification of the unblock. Similar to the check block header, the unchecked block check returns directly in the ModeFullFake mode. Get all the uncle blocks, then traverse the checksum, the checksum will terminate, or the checksum will return.
+
+```go
+func (ethash *Ethash) Veri
