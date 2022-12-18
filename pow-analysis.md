@@ -605,4 +605,54 @@ func (ethash *Ethash) VerifySeal(chain consensus.ChainReader, header *types.Head
 		}
 		return nil
 	}
-	// shared: 
+	// shared: Under PoW, use the shared verification method
+	if ethash.shared != nil {
+		return ethash.shared.VerifySeal(chain, header)
+	}
+	// Ensure that we have a valid difficulty for the block
+	if header.Difficulty.Sign() <= 0 {
+		return errInvalidDifficulty
+	}
+	// Calculate the digest and PoW values and verify the block header
+	number := header.Number.Uint64()
+
+	cache := ethash.cache(number)
+	size := datasetSize(number)
+	if ethash.config.PowMode == ModeTest {
+		size = 32 * 1024
+	}
+	digest, result := hashimotoLight(size, cache.cache, header.HashNoNonce().Bytes(), header.Nonce.Uint64())
+	// Caches are unmapped in a finalizer. Ensure that the cache stays live
+	// until after the call to hashimotoLight so it's not unmapped while being used.
+	runtime.KeepAlive(cache)
+
+	if !bytes.Equal(header.MixDigest[:], digest) {
+		return errInvalidMixDigest
+	}
+	target := new(big.Int).Div(maxUint256, header.Difficulty)
+	// Compare whether the target difficulty requirements are met
+	if new(big.Int).SetBytes(result).Cmp(target) > 0 {
+		return errInvalidPoW
+	}
+	return nil
+}
+```
+
+hashimotoLight and hashimotoFull function similarly, except that hashimotoLight uses a smaller memory that occupies less memory.
+
+```go
+func hashimotoLight(size uint64, cache []uint32, hash []byte, nonce uint64) ([]byte, []byte) {
+	keccak512 := makeHasher(sha3.NewKeccak512())
+
+	lookup := func(index uint32) []uint32 {
+		rawData := generateDatasetItem(cache, index, keccak512)
+
+		data := make([]uint32, len(rawData)/4)
+		for i := 0; i < len(data); i++ {
+			data[i] = binary.LittleEndian.Uint32(rawData[i*4:])
+		}
+		return data
+	}
+	return hashimoto(hash, nonce, size, lookup)
+}
+```
