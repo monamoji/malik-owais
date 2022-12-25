@@ -132,4 +132,12 @@ This issue can be fixed by confiscating the pledged ETH, and not return them to 
 
 Besides confiscation, another scheme can prevent such attacks by introducing an additional system: RANDAO membership. To become a member you must pay dues, anyone paid their dues is a member. Members have different levels according to the dues they paid. Membership does not belong to a contract, but instead functions like a passport to participate in some RANDAO contracts. If a breach of any contract happens, that person's membership will be ended and the dues will be confiscated. Now we can add an additional agreement to C1, C1 will only accept numbers committed by members whose level of investment is high enough (membership dues over 1000 ETH). This will ensure that nobody has a financial motive to try an attack.
 
-## 
+## QA: Quest and Answer
+
+Q: Why not let the miners participate in RNG? Why not use tx hash, nonce and other blockchain data? A: Miners have the ability to manipulate these blockchain data, and thus can indirectly affect RNG. If RNG contains blockchain data, it will give the miners capacity to construct random numbers in their favor.
+
+Q: the miners can ignore certain transactions that contain random number they dislike, how to deal with that? A: That's why we need a time window period. A reasonable period should be greater than 6 blocks, we believe that nobody can produce 6 blocks in succession. So if the participant is honest, and he send numbers immediately as long as each time window open, he doesn't need to worry about being excluded.
+
+Q: Why use all numbers of all participants, rather than a subset? A: The rule to pick a subset is deterministic, so participants will try to take specified position of the collection by various means, if they succeed, they will know in advance what the random number is generating from subsets. If the rule to pick a subset is randomised, then we still have the problem of true randomisation.
+
+Note: f(s1, s2, ..., sn) is a function with multiple inputs, for example r = s1 xor s2 xor s3 ... xor sn, or r = sha3(sn + sha3(sn-1 + ... (sha3(s2 + s1))))
