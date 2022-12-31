@@ -243,4 +243,163 @@ func (w *encbuf) encode(val interface{}) error {
 }
 ```
 
-We ignore th
+We ignore the cache type and the acquisition function of the encoding function and generate the function cachedTypeInfo to move the focus directly to the content encoding function of the specific type.
+
+Ordinary uint Coding in [/rlp/encode.go#writeUint](https://github.com/ethereum/go-ethereum/blob/master/rlp/encode.go#L392)
+
+```go
+func writeUint(val reflect.Value, w *encbuf) error {
+	i := val.Uint()
+	if i == 0 {
+		w.str = append(w.str, 0x80) // Prevent all 0 exception patterns in the sense of encoding, encoding 0 as 0x80
+	} else if i < 128 {
+		// fits single byte
+		w.str = append(w.str, byte(i))
+	} else {
+		// TODO: encode int to w.str directly
+		s := putint(w.sizebuf[1:], i) // The bit with the uint high is zero, removed by the byte granularity, and returns the number of bytes after the removal.
+		w.sizebuf[0] = 0x80 + byte(s) // For uint, the maximum length is 64 bit/8 byte, so compressing the length to byte[0,256) is completely sufficient.
+		w.str = append(w.str, w.sizebuf[:s+1]...) // Output all available bytes in sizebuf as encoded content
+	}
+	return nil
+}
+```
+
+Then [/rlp/encode.go#Encode](https://github.com/ethereum/go-ethereum/blob/master/rlp/encode.go#L80) a subsequent logic [/rlp/encode.go#encbuf.toWriter](https://github.com/ethereum/go-ethereum/blob/master/rlp/encode.go#L249)
+
+```go
+func (w *encbuf) toWriter(out io.Writer) (err error) {
+	strpos := 0
+	for _, head := range w.lheads { // For the case of no lheads data, ignore the following header encoding logic
+		// write string data before header
+		if head.offset-strpos > 0 {
+			n, err := out.Write(w.str[strpos:head.offset])
+			strpos += n
+			if err != nil {
+				return err
+			}
+		}
+		// write the header
+		enc := head.encode(w.sizebuf)
+		if _, err = out.Write(enc); err != nil {
+			return err
+		}
+	}
+	if strpos < len(w.str) { // Strpos is 0, which is inevitable. The content with header encoding is directly used as the final output.
+		// write string data after the last list header
+		_, err = out.Write(w.str[strpos:])
+	}
+	return err
+}
+```
+
+For string encoding [/rlp/encode.go#writeString](https://github.com/ethereum/go-ethereum/blob/master/rlp/encode.go#L461) is similar to uint, does not contain the encoding information of the header. Can refer to the yellow book
+
+```go
+func writeString(val reflect.Value, w *encbuf) error {
+	s := val.String()
+	if len(s) == 1 && s[0] <= 0x7f {
+		// fits single byte, no string header
+		w.str = append(w.str, s[0])
+	} else {
+		w.encodeStringHeader(len(s))
+		w.str = append(w.str, s...)
+	}
+	return nil
+}
+```
+
+function contains more complicated [/rlp/encode.go#makeStructWriter](https://github.com/ethereum/go-ethereum/blob/master/rlp/encode.go#L529)
+
+```go
+func makeStructWriter(typ reflect.Type) (writer, error) {
+	fields, err := structFields(typ)
+	if err != nil {
+		return nil, err
+	}
+	writer := func(val reflect.Value, w *encbuf) error {
+		lh := w.list() // Create a listhead storage object
+		for _, f := range fields {
+			if err := f.info.writer(val.Field(f.index), w); err != nil {
+				return err
+			}
+		}
+		w.listEnd(lh) // Set the value of the listhead object
+		return nil
+	}
+	return writer, nil
+}
+```
+
+[/rlp/encode.go#encbuf.list/listEnd](https://github.com/ethereum/go-ethereum/blob/master/rlp/encode.go#L212)
+
+```go
+func (w *encbuf) list() *listhead {
+	lh := &listhead{offset: len(w.str), size: w.lhsize} // Create a new listhead object with the current total length of the encoding as offset , the current total length of the header lhsize as size
+	w.lheads = append(w.lheads, lh)
+	return lh // Add the header sequence and return it to listEnd
+}
+
+func (w *encbuf) listEnd(lh *listhead) {
+	lh.size = w.size() - lh.offset - lh.size // Is the new header size equal to the newly added code length minus?
+	if lh.size < 56 {
+		w.lhsize += 1 // length encoded into kind tag
+	} else {
+		w.lhsize += 1 + intsize(uint64(lh.size))
+	}
+}
+```
+
+[encbuf.toWriter](https://github.com/ethereum/go-ethereum/blob/master/rlp/encode.go#L248) function is implemented as
+
+```go
+func (w *encbuf) toWriter(out io.Writer) (err error) {
+	strpos := 0
+	for _, head := range w.lheads {
+		// write string data before header
+		if head.offset-strpos > 0 {
+			n, err := out.Write(w.str[strpos:head.offset])
+			strpos += n
+			if err != nil {
+				return err
+			}
+		}
+		// write the header
+		enc := head.encode(w.sizebuf)
+		if _, err = out.Write(enc); err != nil {
+			return err
+		}
+	}
+	if strpos < len(w.str) {
+		// write string data after the last list header
+		_, err = out.Write(w.str[strpos:])
+	}
+	return err
+}
+```
+
+https://github.com/ethereum/go-ethereum/blob/master/rlp/encode.go#L135
+
+```go
+func (head *listhead) encode(buf []byte) []byte {
+	// Convert binary
+	// 0xC0 192: 1100 0000
+	// 0xF7 247: 1111 0111
+	return buf[:puthead(buf, 0xC0, 0xF7, uint64(head.size))]
+}
+```
+
+https://github.com/ethereum/go-ethereum/blob/master/rlp/encode.go#L150
+
+```go
+func puthead(buf []byte, smalltag, largetag byte, size uint64) int {
+	if size < 56 {
+		buf[0] = smalltag + byte(size)
+		return 1
+	} else {
+		sizesize := putint(buf[1:], size)
+		buf[0] = largetag + byte(sizesize)
+		return sizesize + 1
+	}
+}
+```
