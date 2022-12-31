@@ -363,3 +363,356 @@ FUNCTION {format.number.series}
     { number empty$
 	{ series field.or.null }
 	{ output.state mid.sentence =
+	    { "number" }
+	    { "Number" }
+	  if$
+	  number tie.or.space.connect
+	  series empty$
+	    { "there's a number but no series in " cite$ * warning$ }
+	    { " in " * series * }
+	  if$
+	}
+      if$
+    }
+    { "" }
+  if$
+}
+
+FUNCTION {format.edition}
+{ edition empty$
+    { "" }
+    { output.state mid.sentence =
+	{ edition "l" change.case$ " edition" * }
+	{ edition "t" change.case$ " edition" * }
+      if$
+    }
+  if$
+}
+
+INTEGERS { multiresult }
+
+FUNCTION {multi.page.check}
+{ 't :=
+  #0 'multiresult :=
+    { multiresult not
+      t empty$ not
+      and
+    }
+    { t #1 #1 substring$
+      duplicate$ "-" =
+      swap$ duplicate$ "," =
+      swap$ "+" =
+      or or
+	{ #1 'multiresult := }
+	{ t #2 global.max$ substring$ 't := }
+      if$
+    }
+  while$
+  multiresult
+}
+
+FUNCTION {format.pages}
+{ pages empty$
+    { "" }
+    { pages multi.page.check
+	{ "pp." pages n.dashify tie.or.space.connect }
+	{ "p." pages tie.or.space.connect }
+      if$
+    }
+  if$
+}
+
+FUNCTION {format.vol.num.pages}
+{ 
+volume empty$
+   {"" }
+   {"vol. " volume *}
+if$
+number empty$
+   'skip$
+   {", no. " number * *}
+if$
+pages empty$
+   'skip$
+    { duplicate$ empty$
+	{ pop$ format.pages }
+	{ ", pp. " * pages n.dashify * }
+      if$
+    }
+if$
+}
+
+%FUNCTION {format.vol.num.pages}
+%%boldface added 3/17/87 rhr
+%{ volume field.or.null boldface
+%  number empty$
+%    'skip$
+%    { "(" number * ")" * *
+%      volume empty$
+%	{ "there's a number but no volume in " cite$ * warning$ }
+%	'skip$
+%      if$
+%    }
+%  if$
+%  pages empty$
+%    'skip$
+%    { duplicate$ empty$
+%	{ pop$ format.pages }
+%	{ ":" * pages n.dashify * }
+%      if$
+%    }
+%  if$
+%}
+
+FUNCTION {format.chapter.pages}
+{ chapter empty$
+    'format.pages
+    { type empty$
+	{ "chapter" }
+	{ type "l" change.case$ }
+      if$
+      chapter tie.or.space.connect
+      pages empty$
+	'skip$
+	{ ", " * format.pages * }
+      if$
+    }
+  if$
+}
+
+FUNCTION {format.in.ed.booktitle}
+{ booktitle empty$
+    { "" }
+    { editor empty$
+	{ "in " booktitle emphasize * }
+	{ "in "  booktitle emphasize *  ", " * format.editors * }
+      if$
+    }
+  if$
+}
+
+FUNCTION {empty.misc.check}
+{ author empty$ title empty$ howpublished empty$
+  month empty$ year empty$ note empty$
+  and and and and and
+    { "all relevant fields are empty in " cite$ * warning$ }
+    'skip$
+  if$
+}
+
+FUNCTION {format.thesis.type}
+{ type empty$
+    'skip$
+    { pop$
+      type "t" change.case$
+    }
+  if$
+}
+
+FUNCTION {format.tr.number}
+{ type empty$
+    { "Tech. {R}ep." }
+    'type
+  if$
+  number empty$
+    { "t" change.case$ }
+    { number tie.or.space.connect }
+  if$
+}
+
+FUNCTION {format.article.crossref}
+{ key empty$
+    { journal empty$
+	{ "need key or journal for " cite$ * " to crossref " * crossref *
+	  warning$
+	  ""
+	}
+	{ "In {\em " journal * "\/}" * }
+      if$
+    }
+    { "In " key * }
+  if$
+  " \cite{" * crossref * "}" *
+}
+
+FUNCTION {format.crossref.editor}
+{ editor #1 "{vv~}{ll}" format.name$
+  editor num.names$ duplicate$
+  #2 >
+    { pop$ " et~al." * }
+    { #2 <
+	'skip$
+	{ editor #2 "{ff }{vv }{ll}{ jj}" format.name$ "others" =
+	    { " et~al." * }
+	    { " and " * editor #2 "{vv~}{ll}" format.name$ * }
+	  if$
+	}
+      if$
+    }
+  if$
+}
+
+FUNCTION {format.book.crossref}
+{ volume empty$
+    { "empty volume in " cite$ * "'s crossref of " * crossref * warning$
+      "In "
+    }
+    { "vol." volume tie.or.space.connect
+      " of " *
+    }
+  if$
+  editor empty$
+  editor field.or.null author field.or.null =
+  or
+    { key empty$
+	{ series empty$
+	    { "need editor, key, or series for " cite$ * " to crossref " *
+	      crossref * warning$
+	      "" *
+	    }
+	    { "{\em " * series * "\/}" * }
+	  if$
+	}
+	{ key * }
+      if$
+    }
+    { format.crossref.editor * }
+  if$
+  " \cite{" * crossref * "}" *
+}
+
+FUNCTION {format.incoll.inproc.crossref}
+{ editor empty$
+  editor field.or.null author field.or.null =
+  or
+    { key empty$
+	{ booktitle empty$
+	    { "need editor, key, or booktitle for " cite$ * " to crossref " *
+	      crossref * warning$
+	      ""
+	    }
+	    { "In {\em " booktitle * "\/}" * }
+	  if$
+	}
+	{ "In " key * }
+      if$
+    }
+    { "In " format.crossref.editor * }
+  if$
+  " \cite{" * crossref * "}" *
+}
+
+FUNCTION {article}
+{ output.bibitem
+  format.authors "author" output.check
+  new.block
+  format.title ",''" * "title" output.check
+  new.ncblock
+  crossref missing$
+    { journal emphasize "journal" output.check
+      format.vol.num.pages output
+      format.date "year" output.check
+    }
+    { format.article.crossref output.nonnull
+      format.pages output
+    }
+  if$
+  new.block
+  note output
+  fin.entry
+}
+
+FUNCTION {book}
+{ output.bibitem
+  author empty$
+    { format.editors "author and editor" output.check }
+    { format.authors output.nonnull
+      crossref missing$
+	{ "author and editor" editor either.or.check }
+	'skip$
+      if$
+    }
+  if$
+  new.block
+  format.btitle "title" output.check
+  crossref missing$
+    { format.bvolume output
+      new.block
+      format.number.series output
+      new.sentence
+      publisher "publisher" output.check
+      address output
+    }
+    { new.block
+      format.book.crossref output.nonnull
+    }
+  if$
+  format.edition output
+  format.date "year" output.check
+  new.block
+  note output
+  fin.entry
+}
+
+FUNCTION {booklet}
+{ output.bibitem
+  format.authors output
+  new.block
+  format.title ",''" * "title" output.check
+  new.nccont
+  howpublished address new.block.checkb
+  howpublished output
+  address output
+  format.date output
+  new.block
+  note output
+  fin.entry
+}
+
+FUNCTION {inbook}
+{ output.bibitem
+  author empty$
+    { format.editors "author and editor" output.check }
+    { format.authors output.nonnull
+      crossref missing$
+	{ "author and editor" editor either.or.check }
+	'skip$
+      if$
+    }
+  if$
+  new.block
+  format.btitle "title" output.check
+  crossref missing$
+    { format.bvolume output
+      format.chapter.pages "chapter and pages" output.check
+      new.block
+      format.number.series output
+      new.sentence
+      publisher "publisher" output.check
+      address output
+    }
+    { format.chapter.pages "chapter and pages" output.check
+      new.block
+      format.book.crossref output.nonnull
+    }
+  if$
+  format.edition output
+  format.date "year" output.check
+  new.block
+  note output
+  fin.entry
+}
+
+FUNCTION {incollection}
+{ output.bibitem
+  format.authors "author" output.check
+  new.block
+  format.title ",''" * "title" output.check
+  new.ncblock
+  crossref missing$
+    { format.in.ed.booktitle "booktitle" output.check
+      format.bvolume output
+      format.number.series output
+      format.chapter.pages output
+      new.sentence
+      publis
