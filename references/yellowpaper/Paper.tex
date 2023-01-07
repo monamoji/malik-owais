@@ -7,4 +7,94 @@
 \usepackage{subfig}
 \usepackage{amsmath}
 \usepackage{amssymb}
-\usepackage[a
+\usepackage[a4paper,width=170mm,top=18mm,bottom=22mm,includeheadfoot]{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{verbatim}
+\usepackage{caption}
+\usepackage{natbib}
+\usepackage{float}
+\usepackage{pdflscape}
+\usepackage{mathtools}
+\usepackage[usenames,dvipsnames]{xcolor}
+\usepackage{afterpage}
+\usepackage{tikz}
+\usepackage[bookmarks=true, unicode=true, pdftitle={Ethereum Yellow Paper: a formal specification of Ethereum, a programmable blockchain}, pdfauthor={Dr. Gavin Wood},pdfkeywords={Ethereum, Yellow Paper, blockchain, virtual machine, cryptography, decentralised, singleton, transaction, generalised},pdfborder={0 0 0.5 [1 3]}]{hyperref}
+%,pagebackref=true
+
+\usepackage{tabu} %requires array.
+
+%This should be the last package before \input{Version.tex}
+\PassOptionsToPackage{hyphens}{url}\usepackage{hyperref}
+% "hyperref loads the url package internally. Use \PassOptionsToPackage{hyphens}{url}\usepackage{hyperref} to pass the option to the url package when it is loaded by hyperref. This avoids any package option clashes." Source: <https://tex.stackexchange.com/questions/3033/forcing-linebreaks-in-url/3034#comment44478_3034>.
+% Note also this: "If the \PassOptionsToPackage{hyphens}{url} approach does not work, maybe it's "because you're trying to load the url package with a specific option, but it's being loaded by one of your packages before that with a different set of options. Try loading the url package earlier than the package that requires it. If it's loaded by the document class, try using \RequirePackage[hyphens]{url} before the document class." Source: <https://tex.stackexchange.com/questions/3033/forcing-linebreaks-in-url/3034#comment555944_3034>.
+% For more information on using the hyperref package, refer to e.g. https://en.wikibooks.org/w/index.php?title=LaTeX/Hyperlinks&stable=0#Hyperlink_and_Hypertarget.
+
+\makeatletter
+ \newcommand{\linkdest}[1]{\Hy@raisedlink{\hypertarget{#1}{}}}
+\makeatother
+\usepackage{seqsplit}
+
+% For formatting
+%\usepackage{underscore}
+%\usepackage{lipsum} % to generate filler text for testing of document rendering
+\usepackage[english]{babel}
+\usepackage[autostyle]{csquotes}
+\MakeOuterQuote{"}
+
+\usepackage[final]{microtype} % https://tex.stackexchange.com/questions/75140/is-it-possible-to-make-latex-mark-overfull-boxes-in-the-output#comment382776_75142
+
+\input{Version.tex}
+% Default rendering options
+\definecolor{pagecolor}{rgb}{1,0.98,0.9}
+\def\YellowPaperVersionNumber{unknown revision}
+\IfFileExists{Options.tex}{\input{Options.tex}}
+
+\newcommand{\hcancel}[1]{%
+    \tikz[baseline=(tocancel.base)]{
+        \node[inner sep=0pt,outer sep=0pt] (tocancel) {#1};
+        \draw[black] (tocancel.south west) -- (tocancel.north east);
+    }%
+}%
+
+
+\DeclarePairedDelimiter{\ceil}{\lceil}{\rceil}
+\newcommand*\eg{e.g.\@\xspace}
+\newcommand*\Eg{e.g.\@\xspace}
+\newcommand*\ie{i.e.\@\xspace}
+%\renewcommand{\itemhook}{\setlength{\topsep}{0pt}  \setlength{\itemsep}{0pt}\setlength{\leftmargin}{15pt}}
+
+\title{Ethereum: A Secure Decentralised Generalised Transaction Ledger \\ {\smaller \textbf{Byzantium version \YellowPaperVersionNumber}}}
+\author{
+    Dr. Gavin Wood\\
+    Founder, Ethereum \& Parity\\
+    gavin@parity.io
+}
+\begin{document}
+
+\pagecolor{pagecolor}
+
+\begin{abstract}
+The blockchain paradigm when coupled with cryptographically-secured transactions has demonstrated its utility through a number of projects, with Bitcoin being one of the most notable ones. Each such project can be seen as a simple application on a decentralised, but singleton, compute resource. We can call this paradigm a transactional singleton machine with shared-state.
+
+Ethereum implements this paradigm in a generalised manner. Furthermore it provides a plurality of such resources, each with a distinct state and operating code but able to interact through a message-passing framework with others. We discuss its design, implementation issues, the opportunities it provides and the future hurdles we envisage.
+\end{abstract}
+
+\maketitle
+
+\setlength{\columnsep}{20pt}
+\begin{multicols}{2}
+
+\section{Introduction}\label{sec:introduction}
+
+With ubiquitous internet connections in most places of the world, global information transmission has become incredibly cheap. Technology-rooted movements like Bitcoin have demonstrated through the power of the default, consensus mechanisms, and voluntary respect of the social contract, that it is possible to use the internet to make a decentralised value-transfer system that can be shared across the world and virtually free to use. This system can be said to be a very specialised version of a cryptographically secure, transaction-based state machine. Follow-up systems such as Namecoin adapted this original ``currency application'' of the technology into other applications albeit rather simplistic ones.
+
+Ethereum is a project which attempts to build the generalised technology; technology on which all transaction-based state machine concepts may be built. Moreover it aims to provide to the end-developer a tightly integrated end-to-end system for building software on a hitherto unexplored compute paradigm in the mainstream: a trustful object messaging compute framework.
+
+\subsection{Driving Factors} \label{ch:driving}
+
+There are many goals of this project; one key goal is to facilitate transactions between consenting individuals who would otherwise have no means to trust one another. This may be due to geographical separation, interfacing difficulty, or perhaps the incompatibility, incompetence, unwillingness, expense, uncertainty, inconvenience, or corruption of existing legal systems. By specifying a state-change system through a rich and unambiguous language, and furthermore architecting a system such that we can reasonably expect that an agreement will be thus enforced autonomously, we can provide a means to this end.
+
+Dealings in this proposed system would have several attributes not often found in the real world. The incorruptibility of judgement, often difficult to find, comes naturally from a disinterested algorithmic interpreter. Transparency, or being able to see exactly how a state or judgement came about through the transaction log and rules or instructional codes, never happens perfectly in human-based systems since natural language is necessarily vague, information is often lacking, and plain old prejudices are difficult to shake.
+
+Overall, we wish to provide a system such that users can be guaranteed that no matt
