@@ -553,4 +553,73 @@ In order to avoid issues of network abuse and to sidestep the inevitable questio
 
 Every transaction has a specific amount of gas associated with it: \textbf{gasLimit}. This is the amount of gas which is implicitly purchased from the sender's account balance. The purchase happens at the according \textbf{gasPrice}, also specified in the transaction. The transaction is considered invalid if the account balance cannot support such a purchase. It is named \textbf{gasLimit} since any unused gas at the end of the transaction is refunded (at the same rate of purchase) to the sender's account. Gas does not exist outside of the execution of a transaction. Thus for accounts with trusted code associated, a relatively high gas limit may be set and left alone.
 
-In general, Ether used to purchase gas that is not refunded is delivered to the \textit{beneficiary} address, the address of an account typically under the control of the miner. Transactors are free to specify any \textbf{gasPrice} that they wish, however miners are free to ignore transactions as they choose. A higher
+In general, Ether used to purchase gas that is not refunded is delivered to the \textit{beneficiary} address, the address of an account typically under the control of the miner. Transactors are free to specify any \textbf{gasPrice} that they wish, however miners are free to ignore transactions as they choose. A higher gas price on a transaction will therefore cost the sender more in terms of Ether and deliver a greater value to the miner and thus will more likely be selected for inclusion by more miners. Miners, in general, will choose to advertise the minimum gas price for which they will execute transactions and transactors will be free to canvas these prices in determining what gas price to offer. Since there will be a (weighted) distribution of minimum acceptable gas prices, transactors will necessarily have a trade-off to make between lowering the gas price and maximising the chance that their transaction will be mined in a timely manner.
+
+%\subsubsection{Determining Computation Costs}
+
+\section{Transaction Execution} \label{ch:transactions}
+
+The execution of a transaction is the most complex part of the Ethereum protocol: it defines the state transition function \hyperlink{Upsilon_state_transition}{$\Upsilon$}. It is assumed that any transactions executed first pass the initial tests of intrinsic validity. These include:
+
+\begin{enumerate}
+\item The transaction is well-formed RLP, with no additional trailing bytes;
+\item the transaction signature is valid;
+\item the \hyperlink{transaction_nonce}{transaction nonce} is valid (equivalent to the \hyperlink{account_nonce}{sender account's current nonce});
+\item the gas limit is no smaller than the intrinsic gas, $g_0$, used by the transaction; and
+\item the sender account balance contains at least the cost, $v_0$, required in up-front payment.
+\end{enumerate}
+
+Formally, we consider the function \hyperlink{Upsilon_state_transition}{$\Upsilon$}, with $T$ being a transaction and $\boldsymbol{\sigma}$ the state:
+\begin{equation}
+\boldsymbol{\sigma}' = \Upsilon(\boldsymbol{\sigma}, T)
+\end{equation}
+
+Thus $\boldsymbol{\sigma}'$ is the post-transactional state. We also define \hyperlink{tx_total_gas_used_Upsilon_pow_g}{$\Upsilon^{\mathrm{g}}$} to evaluate to the amount of gas used in the execution of a transaction, \hyperlink{tx_logs_Upsilon_pow_l}{$\Upsilon^{\mathbf{l}}$} to evaluate to the transaction's accrued log items and \hyperlink{tx_status_Upsilon_pow_z}{$\Upsilon^{\mathrm{z}}$} to evaluate to the status code resulting from the transaction. These will be formally defined later.
+
+\subsection{Substate}
+Throughout transaction execution, we accrue certain information that is acted upon immediately following the transaction. We call this \textit{transaction substate}, and represent it as $A$, which is a tuple:
+\begin{equation}
+A \equiv (A_{\mathbf{s}}, A_{\mathbf{l}}, A_{\mathbf{t}}, A_{\mathrm{r}})
+\end{equation}
+
+\hypertarget{self_destruct_set_wordy_defn_A__s}{}The tuple contents include $A_{\mathbf{s}}$, the self-destruct set: a set of accounts that will be discarded following the transaction's completion.\hypertarget{tx_log_series_wordy_defn_A__l}{} $A_{\mathbf{l}}$ is the log series: this is a series of archived and indexable `checkpoints' in VM code execution that allow for contract-calls to be easily tracked by onlookers external to the Ethereum world (such as decentralised application front-ends).\hypertarget{tx_touched_accounts_wordy_defn_A__t}{} $A_{\mathbf{t}}$ is the set of touched accounts, of which the empty ones are deleted at the end of a transaction.\hypertarget{refund_balance_defn_words_A__r}{} Finally there is $A_{\mathrm{r}}$, the refund balance, increased through using the \hyperlink{SSTORE}{{\small SSTORE}} instruction in order to reset contract storage to zero from some non-zero value. Though not immediately refunded, it is allowed to partially offset the total execution costs.
+
+We define the empty substate $A^0$ to have no self-destructs, no logs, no touched accounts and a zero refund balance:
+\begin{equation}
+A^0 \equiv (\varnothing,(), \varnothing, 0)
+\end{equation}
+
+\subsection{Execution}
+\hypertarget{intrinsic_gas_g_0}{}We define intrinsic gas $g_0$, the amount of gas this transaction requires to be paid prior to execution, as follows:
+\begin{align}
+g_0 \equiv {} & \sum_{i \in T_{\mathbf{i}}, T_{\mathbf{d}}} \begin{cases} \hyperlink{G__txdatazero}{G_{\mathrm{txdatazero}}} & \text{if} \quad i = 0 \\ \hyperlink{G__txdatanonzero}{G_{\mathrm{txdatanonzero}}} & \text{otherwise} \end{cases} \\
+{} & + \begin{cases} \hyperlink{G__txcreate}{G_{\mathrm{txcreate}}} & \text{if} \quad T_{\mathrm{t}} = \varnothing \\ 0 & \text{otherwise} \end{cases} \\
+{} & + \hyperlink{G__transaction}{G_{\mathrm{transaction}}}
+\end{align}
+
+where $T_{\mathbf{i}},T_{\mathbf{d}}$ means the series of bytes of the transaction's associated data and initialisation EVM-code, depending on whether the transaction is for contract-creation or message-call. $G_{\mathrm{txcreate}}$ is added if the transaction is contract-creating, but not if a result of EVM-code. $G$ is fully defined in Appendix \ref{app:fees}.
+
+The up-front cost $v_0$ is calculated as:
+\begin{equation}
+v_0 \equiv \hyperlink{tx_gas_limit_T__g}{T_{\mathrm{g}}} \hyperlink{tx_gas_price_T__p}{T_{\mathrm{p}}} + \hyperlink{tx_value_T__v}{T_{\mathrm{v}}}
+\end{equation}
+
+The validity is determined as:
+\begin{equation}
+\begin{array}[t]{rcl}
+S(T) & \neq & \varnothing \quad \wedge \\
+\boldsymbol{\sigma}[S(T)] & \neq & \varnothing \quad \wedge \\
+\linkdest{transaction_nonce}{}T_{\mathrm{n}} & = & \boldsymbol{\sigma}[S(T)]_{\mathrm{n}} \quad \wedge \\
+g_0 & \leqslant & T_{\mathrm{g}} \quad \wedge \\
+v_0 & \leqslant & \boldsymbol{\sigma}[S(T)]_{\mathrm{b}} \quad \wedge \\
+T_{\mathrm{g}} & \leqslant & {B_{H}}_{\mathrm{l}} - \hyperlink{ell}{\ell}(B_{\mathbf{R}})_{\mathrm{u}}
+\end{array}
+\end{equation}
+
+Note the final condition; the sum of the transaction's gas limit, $T_{\mathrm{g}}$, and the gas utilised in this block prior, given by $\hyperlink{ell}{\ell}(B_{\mathbf{R}})_{\mathrm{u}}$, must be no greater than the block's \textbf{gasLimit}, ${B_{H}}_{\mathrm{l}}$.
+
+The execution of a valid transaction begins with an irrevocable change made to the state: the \hyperlink{account_nonce}{nonce of the account of the sender}, $S(T)$, is incremented by one and the balance is reduced by part of the up-front cost, $T_{\mathrm{g}}T_{\mathrm{p}}$. The gas available for the proceeding computation, $g$, is defined as $T_{\mathrm{g}} - g_0$. The computation, whether contract creation or a message call, results in an eventual state (which may legally be equivalent to the current state), the change to which is deterministic and never invalid: there can be no invalid transactions from this point.
+
+We define the checkpoint state $\boldsymbol{\sigma}_0$:
+\begin{eqnarray}
+\boldsymbol{\
