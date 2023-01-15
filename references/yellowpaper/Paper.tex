@@ -405,4 +405,100 @@ where $\mathcal{B}$ is the bit reference function such that $\mathcal{B}_{\mathr
 
 \subsubsection{Holistic Validity}
 
-\linkdest{block_validity}{}We can assert a block's validity if and only if it satisfies several conditions: it must be internally consistent with the ommer and transaction block hashes and the given transactions $B_{
+\linkdest{block_validity}{}We can assert a block's validity if and only if it satisfies several conditions: it must be internally consistent with the ommer and transaction block hashes and the given transactions $B_{\mathbf{T}}$ (as specified in sec \ref{ch:finalisation}), when executed in order on the base state $\boldsymbol{\sigma}$ (derived from the final state of the parent block), result in a new state of the identity $H_{\mathrm{r}}$:
+\begin{equation}
+\begin{array}[t]{lclc}
+\linkdest{new_state_H__r}{}H_{\mathrm{r}} &\equiv& \mathtt{TRIE}(L_S(\Pi(\boldsymbol{\sigma}, B))) & \wedge \\
+\linkdest{Ommer_block_hash_H__o}{}H_{\mathrm{o}} &\equiv& \mathtt{KEC}(\mathtt{RLP}(L_H^*(B_{\mathbf{U}}))) & \wedge \\
+\linkdest{tx_block_hash_H__t}{}H_{\mathrm{t}} &\equiv& \mathtt{TRIE}(\{\forall i < \lVert B_{\mathbf{T}} \rVert, i \in \mathbb{N}: &\\&& \quad\quad p (i, L_{T}(B_{\mathbf{T}}[i]))\}) & \wedge \\
+\linkdest{Receipts_Root_H__e}{}H_{\mathrm{e}} &\equiv& \mathtt{TRIE}(\{\forall i < \lVert B_{\mathbf{R}} \rVert, i \in \mathbb{N}: &\\&& \quad\quad p(i, \hyperlink{transaction_receipt_preparation_function_for_RLP_serialisation}{L_{R}}(B_{\mathbf{R}}[i]))\}) & \wedge \\
+\linkdest{logs_Bloom_filter_H__b}{}H_{\mathrm{b}} &\equiv& \bigvee_{\mathbf{r} \in B_{\mathbf{R}}} \big( \mathbf{r}_{\mathrm{b}} \big)
+\end{array}
+\end{equation}
+where $p(k, v)$ is simply the pairwise RLP transformation, in this case, the first being the index of the transaction in the block and the second being the transaction receipt:
+\begin{equation}
+p(k, v) \equiv \big( \mathtt{RLP}(k), \mathtt{RLP}(v) \big)
+\end{equation}
+
+Furthermore:
+\begin{equation}
+\mathtt{TRIE}(L_{S}(\boldsymbol{\sigma})) = {P(B_H)_H}_{\mathrm{r}}
+\end{equation}
+
+Thus $\texttt{TRIE}(L_{S}(\boldsymbol{\sigma}))$ is the root node hash of the Merkle Patricia tree structure containing the key-value pairs of the state $\boldsymbol{\sigma}$ with values encoded using RLP, and $P(B_{H})$ is the parent block of $B$, defined directly.
+
+The values stemming from the computation of transactions, specifically the \hyperlink{Transaction_Receipt}{transaction receipts}, $B_{\mathbf{R}}$, and that defined through the transaction's \hyperlink{Pi}{state-accumulation function, $\Pi$}, are formalised later in section \ref{sec:statenoncevalidation}.
+
+\subsubsection{Serialisation}
+
+\hypertarget{block_preparation_function_for_RLP_serialization_L__B}{}\linkdest{L__B}\hypertarget{block_preparation_function_for_RLP_serialization_L__H}{}\linkdest{L__B}The function $L_{B}$ and $L_{H}$ are the preparation functions for a block and block header respectively. Much like the \hyperlink{transaction_receipt_preparation_function_for_RLP_serialisation}{transaction receipt preparation function $L_{R}$}, we assert the types and order of the structure for when the RLP transformation is required:
+\begin{eqnarray}
+\quad L_{H}(H) & \equiv & (\begin{array}[t]{l}H_{\mathrm{p}}, H_{\mathrm{o}}, H_{\mathrm{c}}, H_{\mathrm{r}}, H_{\mathrm{t}}, H_{\mathrm{e}}, H_{\mathrm{b}}, H_{\mathrm{d}},\\ H_{\mathrm{i}}, H_{\mathrm{l}}, H_{\mathrm{g}}, H_{\mathrm{s}}, H_{\mathrm{x}}, H_{\mathrm{m}}, H_{\mathrm{n}} \; )\end{array} \\
+\quad L_{B}(B) & \equiv & \big( L_{H}(B_{H}), L_{T}^*(B_{\mathbf{T}}), L_{H}^*(\hyperlink{ommer_block_headers_B__U}{B_{\mathbf{U}}}) \big)
+\end{eqnarray}
+
+\hypertarget{general_element_wise_sequence_transformation_f_pow_asterisk}{}With $L_T^*$ and $L_H^*$ being element-wise sequence transformations, thus:
+\begin{equation}
+\hyperlink{general_element_wise_sequence_transformation_f_pow_asterisk}{f^*}\big( (x_0, x_1, ...) \big) \equiv \big( f(x_0), f(x_1), ... \big) \quad \text{for any function} \; f
+\end{equation}
+
+The component types are defined thus:
+\begin{equation}
+\begin{array}[t]{lclclcl}
+\hyperlink{parent_Hash_H__p_def_words}{H_{\mathrm{p}}} \in \mathbb{B}_{32} & \wedge & H_{\mathrm{o}} \in \mathbb{B}_{32} & \wedge & H_{\mathrm{c}} \in \mathbb{B}_{20} & \wedge \\
+\hyperlink{new_state_H__r}{H_{\mathrm{r}}} \in \mathbb{B}_{32} & \wedge & H_{\mathrm{t}} \in \mathbb{B}_{32} & \wedge & \hyperlink{Receipts_Root_H__e}{H_{\mathrm{e}}} \in \mathbb{B}_{32} & \wedge \\
+\hyperlink{logs_Bloom_filter_H__b}{H_{\mathrm{b}}} \in \mathbb{B}_{256} & \wedge & H_{\mathrm{d}} \in \mathbb{N} & \wedge & \hyperlink{block_number_H__i}{H_{\mathrm{i}}} \in \mathbb{N} & \wedge \\
+\hyperlink{block_gas_limit_H__l}{H_{\mathrm{l}}} \in \mathbb{N} & \wedge & H_{\mathrm{g}} \in \mathbb{N} & \wedge & \hyperlink{block_timestamp_H__s}{H_{\mathrm{s}}} \in \mathbb{N}_{256} & \wedge \\
+\hyperlink{block_extraData_H__x}{H_{\mathrm{x}}} \in \mathbb{B} & \wedge & H_{\mathrm{m}} \in \mathbb{B}_{32} & \wedge & \hyperlink{block_nonce_H__n}{H_{\mathrm{n}}} \in \mathbb{B}_{8}
+\end{array}
+\end{equation}
+
+where
+\begin{equation}
+\mathbb{B}_{\mathrm{n}} = \{ B: B \in \mathbb{B} \wedge \lVert B \rVert = n \}
+\end{equation}
+
+We now have a rigorous specification for the construction of a formal block structure. The RLP function $\texttt{RLP}$ (see Appendix \ref{app:rlp}) provides the canonical method for transforming this structure into a sequence of bytes ready for transmission over the wire or storage locally.
+
+\subsubsection{Block Header Validity}
+
+We define $P(B_{H})$ to be the parent block of $B$, formally:
+\begin{equation}
+P(H) \equiv B': \mathtt{KEC}(\mathtt{RLP}(B'_{H})) = \hyperlink{parent_Hash_H__p_def_words}{H_{\mathrm{p}}}
+\end{equation}
+
+\hypertarget{block_number_H__i}{}The block number is the parent's block number incremented by one:
+\begin{equation}
+H_{\mathrm{i}} \equiv {{P(H)_{H}}_{\mathrm{i}}} + 1
+\end{equation}
+
+\newcommand{\mindifficulty}{D_0}
+\newcommand{\homesteadmod}{\ensuremath{\varsigma_2}}
+\newcommand{\expdiffsymb}{\ensuremath{\epsilon}}
+\newcommand{\diffadjustment}{x}
+
+\hypertarget{block_difficulty_H__d}{}\linkdest{H__d}The canonical difficulty of a block of header $H$ is defined as $D(H)$:
+\begin{equation}
+D(H) \equiv \begin{dcases}
+\mindifficulty & \text{if} \quad H_{\mathrm{i}} = 0\\
+\text{max}\!\left(\mindifficulty, {P(H)_{H}}_{\mathrm{d}} + \diffadjustment\times\homesteadmod + \expdiffsymb \right) & \text{otherwise}\\
+\end{dcases}
+\end{equation}
+where:
+\begin{equation}
+\mindifficulty \equiv 131072
+\end{equation}
+\begin{equation}
+\diffadjustment \equiv \left\lfloor\frac{{P(H)_{H}}_{\mathrm{d}}}{2048}\right\rfloor
+\end{equation}
+\begin{equation}
+\homesteadmod \equiv \text{max}\left( y - \left\lfloor\frac{H_{\mathrm{s}} - {P(H)_{H}}_{\mathrm{s}}}{9}\right\rfloor, -99 \right)
+\end{equation}
+\begin{equation*}
+y \equiv \begin{cases}
+1 & \text{if} \, \lVert P(H)_{\mathbf{U}}\rVert = 0 \\
+2 & \text{otherwise}
+\end{cases}
+\end{equation*}
+\begin{align}
+\expdiffsymb &\equiv \left\lfloor 2^{ \left\lfloor H'_{\mathrm
