@@ -501,4 +501,56 @@ y \equiv \begin{cases}
 \end{cases}
 \end{equation*}
 \begin{align}
-\expdiffsymb &\equiv \left\lfloor 2^{ \left\lfloor H'_{\mathrm
+\expdiffsymb &\equiv \left\lfloor 2^{ \left\lfloor H'_{\mathrm{i}} \div 100000 \right\rfloor - 2 } \right\rfloor \\
+H'_{\mathrm{i}} &\equiv \max(H_{\mathrm{i}} - 3000000, 0)
+\end{align}
+
+Note that $\mindifficulty$ is the difficulty of the genesis block. The \textit{Homestead} difficulty parameter, $\homesteadmod$, is used to affect a dynamic homeostasis of time between blocks, as the time between blocks varies, as discussed below, as implemented in EIP-2 by \cite{EIP-2}. In the Homestead release, the exponential difficulty symbol, $\expdiffsymb$ causes the difficulty to slowly increase (every 100,000 blocks) at an exponential rate, and thus increasing the block time difference, and putting time pressure on transitioning to proof-of-stake. This effect, known as the "difficulty bomb", or "ice age", was explained in EIP-649 by \cite{EIP-649} and delayed and implemented earlier in EIP-2. $\homesteadmod$ was also modified in EIP-100 with the use of $x$, the adjustment factor above, and the denominator 9, in order to target the mean block time including uncle blocks by \cite{EIP-100}. Finally, in the Byzantium release, with EIP-649, the ice age was delayed by creating a fake block number, $H'_{\mathrm{i}}$, which is obtained by subtracting three million from the actual block number, which in other words reduced $\expdiffsymb$ and the time difference between blocks, in order to allow more time to develop proof-of-stake and preventing the network from "freezing" up.
+
+\hypertarget{block_gas_limit_H__l}{}The canonical gas limit $H_{\mathrm{l}}$ of a block of header $H$ must fulfil the relation:
+\begin{eqnarray}
+& & H_{\mathrm{l}} < {P(H)_{H}}_{\mathrm{l}} + \left\lfloor\frac{{P(H)_{H}}_{\mathrm{l}}}{1024}\right\rfloor \quad \wedge \\
+\nonumber& & H_{\mathrm{l}} > {P(H)_{H}}_{\mathrm{l}} - \left\lfloor\frac{{P(H)_{H}}_{\mathrm{l}}}{1024}\right\rfloor \quad \wedge \\
+\nonumber& & H_{\mathrm{l}} \geqslant 5000
+\end{eqnarray}
+
+\hypertarget{block_timestamp_H__s}{}$H_{\mathrm{s}}$ is the timestamp (in Unix's time()) of block $H$ and must fulfil the relation:
+\begin{equation}
+H_{\mathrm{s}} > {P(H)_{H}}_{\mathrm{s}}
+\end{equation}
+
+This mechanism enforces a homeostasis in terms of the time between blocks; a smaller period between the last two blocks results in an increase in the difficulty level and thus additional computation required, lengthening the likely next period. Conversely, if the period is too large, the difficulty, and expected time to the next block, is reduced.
+
+The nonce, \linkdest{H__n}\hyperlink{block_nonce_H__n}{$H_{\mathrm{n}}$}, must satisfy the relations:
+\begin{equation}
+n \leqslant \frac{2^{256}}{H_{\mathrm{d}}} \quad \wedge \quad m = H_{\mathrm{m}}
+\end{equation}
+with $(n, m) = \mathtt{PoW}(H_{\hcancel{n}}, H_{\mathrm{n}}, \mathbf{d})$.
+
+\hypertarget{block_header_without_nonce_and_mixmash_h__cancel_n}{}\linkdest{H_cancel_n}Where $H_{\hcancel{n}}$ is the new block's header $H$, but \textit{without} the nonce and mix-hash components, $\mathbf{d}$ being the current DAG, a large data set needed to compute the mix-hash, and $\mathtt{PoW}$ is the proof-of-work function (see section \ref{ch:pow}): this evaluates to an array with the first item being the mix-hash, to prove that a correct DAG has been used, and the second item being a pseudo-random number cryptographically dependent on $H$ and $\mathbf{d}$. Given an approximately uniform distribution in the range $[0, 2^{64})$, the expected time to find a solution is proportional to the difficulty, $H_{\mathrm{d}}$.
+
+This is the foundation of the security of the blockchain and is the fundamental reason why a malicious node cannot propagate newly created blocks that would otherwise overwrite (``rewrite'') history. Because the nonce must satisfy this requirement, and because its satisfaction depends on the contents of the block and in turn its composed transactions, creating new, valid, blocks is difficult and, over time, requires approximately the total compute power of the trustworthy portion of the mining peers.
+
+\hypertarget{block_header_validity_function}{}Thus we are able to define the block header validity function $V(H)$:
+\begin{eqnarray}
+V(H) & \equiv &  n \leqslant \frac{2^{256}}{H_{\mathrm{d}}} \wedge m = H_{\mathrm{m}} \quad \wedge \\
+\nonumber & & H_{\mathrm{d}} = D(H) \quad \wedge \\
+\nonumber& & H_{\mathrm{g}} \le H_{\mathrm{l}}  \quad \wedge \\
+\nonumber& & H_{\mathrm{l}} < {P(H)_{H}}_{\mathrm{l}} + \left\lfloor\frac{{P(H)_{H}}_{\mathrm{l}}}{1024}\right\rfloor  \quad \wedge \\
+\nonumber& & H_{\mathrm{l}} > {P(H)_{H}}_{\mathrm{l}} - \left\lfloor\frac{{P(H)_{H}}_{\mathrm{l}}}{1024}\right\rfloor  \quad \wedge \\
+\nonumber& & H_{\mathrm{l}} \geqslant 5000  \quad \wedge \\
+\nonumber& & H_{\mathrm{s}} > {P(H)_{H}}_{\mathrm{s}} \quad \wedge \\
+\nonumber& & H_{\mathrm{i}} = {P(H)_{H}}_{\mathrm{i}} +1 \quad \wedge \\
+\nonumber& & \lVert H_{\mathrm{x}} \rVert \le 32
+\end{eqnarray}
+where $(n, m) = \mathtt{PoW}(H_{\hcancel{n}}, H_{\mathrm{n}}, \mathbf{d})$
+
+Noting additionally that \textbf{extraData} must be at most 32 bytes.
+
+\section{Gas and Payment} \label{ch:payment}
+
+In order to avoid issues of network abuse and to sidestep the inevitable questions stemming from Turing completeness, all programmable computation in Ethereum is subject to fees. The fee schedule is specified in units of \textit{gas} (see Appendix \ref{app:fees} for the fees associated with various computation). Thus any given fragment of programmable computation (this includes creating contracts, making message calls, utilising and accessing account storage and executing operations on the virtual machine) has a universally agreed cost in terms of gas.
+
+Every transaction has a specific amount of gas associated with it: \textbf{gasLimit}. This is the amount of gas which is implicitly purchased from the sender's account balance. The purchase happens at the according \textbf{gasPrice}, also specified in the transaction. The transaction is considered invalid if the account balance cannot support such a purchase. It is named \textbf{gasLimit} since any unused gas at the end of the transaction is refunded (at the same rate of purchase) to the sender's account. Gas does not exist outside of the execution of a transaction. Thus for accounts with trusted code associated, a relatively high gas limit may be set and left alone.
+
+In general, Ether used to purchase gas that is not refunded is delivered to the \textit{beneficiary} address, the address of an account typically under the control of the miner. Transactors are free to specify any \textbf{gasPrice} that they wish, however miners are free to ignore transactions as they choose. A higher
