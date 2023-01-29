@@ -693,4 +693,90 @@ The address of the new account is defined as being the rightmost 160 bits of the
 a \equiv \mathcal{B}_{96..255}\Big(\mathtt{KEC}\Big(\mathtt{RLP}\big(\;(s, \boldsymbol{\sigma}[s]_{\mathrm{n}} - 1)\;\big)\Big)\Big)
 \end{equation}
 
-where $\mathtt{KEC}$ is the Keccak 256-bit hash function, $\mathtt{RLP}$ is the RLP encoding function, $\mathcal{B}_{a..b}(X)$ evaluates to a binary value containing the bits of indices in the range $[a, b]$ of the binary data $X$, and $\boldsymbol{\sigma}[x]$ is the address state of $x$, or $\varnothing$ if none exists. Note we u
+where $\mathtt{KEC}$ is the Keccak 256-bit hash function, $\mathtt{RLP}$ is the RLP encoding function, $\mathcal{B}_{a..b}(X)$ evaluates to a binary value containing the bits of indices in the range $[a, b]$ of the binary data $X$, and $\boldsymbol{\sigma}[x]$ is the address state of $x$, or $\varnothing$ if none exists. Note we use one fewer than the sender's nonce value; we assert that we have incremented the sender account's nonce prior to this call, and so the value used is the sender's nonce at the beginning of the responsible transaction or VM operation.
+
+The account's nonce is initially defined as one, the balance as the value passed, the storage as empty and the code hash as the Keccak 256-bit hash of the empty string; the sender's balance is also reduced by the value passed. Thus the mutated state becomes $\boldsymbol{\sigma}^*$:
+\begin{equation}
+\boldsymbol{\sigma}^* \equiv \boldsymbol{\sigma} \quad \text{except:}
+\end{equation}
+\begin{eqnarray}
+\boldsymbol{\sigma}^*[a] &=& \big( 1, v + v', \mathtt{\hyperlink{trie}{TRIE}}(\varnothing), \mathtt{KEC}\big(()\big) \big) \\
+\boldsymbol{\sigma}^*[s] &=& \begin{cases}
+\varnothing & \text{if}\ \boldsymbol{\sigma}[s] = \varnothing \ \wedge\ v = 0 \\
+\mathbf{a}^* & \text{otherwise}
+\end{cases} \\
+\mathbf{a}^* &\equiv& (\boldsymbol{\sigma}[s]_{\mathrm{n}}, \boldsymbol{\sigma}[s]_{\mathrm{b}} - v, \boldsymbol{\sigma}[s]_{\mathbf{s}}, \boldsymbol{\sigma}[s]_{\mathrm{c}})
+\end{eqnarray}
+
+where $v'$ is the account's pre-existing value, in the event it was previously in existence:
+\begin{equation}
+v' \equiv \begin{cases}
+0 & \text{if} \quad \boldsymbol{\sigma}[a] = \varnothing\\
+\boldsymbol{\sigma}[a]_{\mathrm{b}} & \text{otherwise}
+\end{cases}
+\end{equation}
+
+%It is asserted that the state database will also change such that it defines the pair $(\mathtt{KEC}(\mathbf{b}), \mathbf{b})$.
+
+Finally, the account is initialised through the execution of the initialising EVM code $\mathbf{i}$ according to the execution model (see section \ref{ch:model}). Code execution can effect several events that are not internal to the execution state: the account's storage can be altered, further accounts can be created and further message calls can be made. As such, the code execution function $\Xi$ evaluates to a tuple of the resultant state $\boldsymbol{\sigma}^{**}$, available gas remaining $g^{**}$, the accrued substate $A$ and the body code of the account $\mathbf{o}$.
+
+\begin{equation}
+(\boldsymbol{\sigma}^{**}, g^{**}, A, \mathbf{o}) \equiv \Xi(\boldsymbol{\sigma}^*, g, I, \{s, a\}) \\
+\end{equation}
+\pagebreak[1]where $I$ contains the parameters of the \hyperlink{exec_env}{execution environment}, that is:\pagebreak[1]
+\begin{eqnarray}
+I_{\mathrm{a}} & \equiv & a \\
+I_{\mathrm{o}} & \equiv & o \\
+I_{\mathrm{p}} & \equiv & p \\
+I_{\mathbf{d}} & \equiv & () \\
+I_{\mathrm{s}} & \equiv & s \\
+\hyperlink{I__v}{I_{\mathrm{v}}} & \equiv & v \\
+I_{\mathbf{b}} & \equiv & \mathbf{i} \\
+I_{\mathrm{e}} & \equiv & e \\
+I_{\mathrm{w}} & \equiv & w
+\end{eqnarray}
+
+$I_{\mathbf{d}}$ evaluates to the empty tuple as there is no input data to this call. $I_{H}$ has no special treatment and is determined from the blockchain.
+
+Code execution depletes gas, and gas may not go below zero, thus execution may exit before the code has come to a natural halting state. In this (and several other) exceptional cases we say an out-of-gas (OOG) exception has occurred: The evaluated state is defined as being the empty set, $\varnothing$, and the entire create operation should have no effect on the state, effectively leaving it as it was immediately prior to attempting the creation.
+
+If the initialization code completes successfully, a final contract-creation cost is paid, the code-deposit cost, $c$, proportional to the size of the created contract's code:
+\begin{equation}
+c \equiv G_{codedeposit} \times |\mathbf{o}|
+\end{equation}
+
+If there is not enough gas remaining to pay this, \ie $g^{**} < c$, then we also declare an out-of-gas exception.
+
+The gas remaining will be zero in any such exceptional condition, \ie if the creation was conducted as the reception of a transaction, then this doesn't affect payment of the intrinsic cost of contract creation; it is paid regardless. However, the value of the transaction is not transferred to the aborted contract's address when we are out-of-gas.
+
+If such an exception does not occur, then the remaining gas is refunded to the originator and the now-altered state is allowed to persist. Thus formally, we may specify the resultant state, gas, substate and status code as $(\boldsymbol{\sigma}', g', A, z)$ where:
+
+\begin{align}
+\quad g' &\equiv \begin{cases}
+0 & \text{if} \quad F \\
+g^{**} - c & \text{otherwise} \\
+\end{cases} \\
+\quad \boldsymbol{\sigma}' &\equiv  \begin{cases}
+\boldsymbol{\sigma} & \text{if} \quad F \\
+\boldsymbol{\sigma}^{**} \quad \text{except:} & \\
+\quad\boldsymbol{\sigma}'[a] = \varnothing & \text{if} \quad \mathtt{DEAD}(\boldsymbol{\sigma}^{**}, a) \\
+\boldsymbol{\sigma}^{**} \quad \text{except:} & \\
+\quad\boldsymbol{\sigma}'[a]_{\mathrm{c}} = \texttt{KEC}(\mathbf{o}) & \text{otherwise}
+\end{cases} \\
+\quad z &\equiv \begin{cases}
+0 & \text{if} \quad \boldsymbol{\sigma}^{**} = \varnothing \lor g^{**} < c \\
+1 & \text{otherwise}
+\end{cases} \\
+\nonumber \text{where} \\
+F &\equiv \big((\boldsymbol{\sigma}^{**} = \varnothing \ \wedge\ \mathbf{o} = \varnothing) \vee\  g^{**} < c \ \vee\  |\mathbf{o}| > 24576\big)
+\end{align}
+
+The exception in the determination of $\boldsymbol{\sigma}'$ dictates that $\mathbf{o}$, the resultant byte sequence from the execution of the initialisation code, specifies the final body code for the newly-created account.
+
+Note that intention is that the result is either a successfully created new contract with its endowment, or no new contract with no transfer of value.
+
+\subsection{Subtleties}
+Note that while the initialisation code is executing, the newly created address exists but with no intrinsic body code\footnote{During initialization code execution, \texttt{EXTCODESIZE} on the address should return zero, which is the length of the code of the account while \texttt{CODESIZE} should return the length of the initialization code (as defined in \ref{subsec:instruction-set}).}. Thus any message call received by it during this time causes no code to be executed. If the initialisation execution ends with a {\small SELFDESTRUCT} instruction, the matter is moot since the account will be deleted before the transaction is completed. For a normal {\small STOP} code, or if the code returned is otherwise empty, then the state is left with a zombie account, and any remaining balance will be locked into the account forever.
+
+\section{Message Call} \label{ch:call}
+In th
