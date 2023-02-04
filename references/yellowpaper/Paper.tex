@@ -1017,4 +1017,116 @@ D_{J}(\mathbf{c}, i) \equiv \begin{cases}
 \{\} & \text{if} \quad i \geqslant |\mathbf{c}|  \\
 \{ i \} \cup D_{J}(\mathbf{c}, N(i, \mathbf{c}[i])) & \\
 \quad\quad\text{if} \quad \mathbf{c}[i] = \text{\small JUMPDEST} \\
-D_{J}(\mathbf{c}, N(i, \mathbf{c}[i])) & \text{oth
+D_{J}(\mathbf{c}, N(i, \mathbf{c}[i])) & \text{otherwise} \\
+\end{cases}
+\end{equation}
+
+where $N$ is the next valid instruction position in the code, skipping the data of a {\small PUSH} instruction, if any:
+\begin{equation}
+N(i, w) \equiv \begin{cases}
+i + w - \text{\small PUSH1} + 2 & \\
+\quad\quad\text{if} \quad w \in [\text{\small PUSH1}, \text{\small PUSH32}] \\
+i + 1 & \text{otherwise} \end{cases}
+\end{equation}
+
+\subsubsection{Normal Halting}\hypertarget{normal_halting_function_H}{}\linkdest{hhalt}
+
+The normal halting function $H$ is defined:
+\begin{equation}
+H(\boldsymbol{\mu}, I) \equiv \begin{cases}
+H_{\text{\tiny RETURN}}(\boldsymbol{\mu}) \ \text{if} \quad w \in \{\text{\small \hyperlink{RETURN}{RETURN}}, \text{\small REVERT}\} &\\
+() \quad\quad\ \text{if} \quad w \in \{ \text{\small \hyperlink{stop}{STOP}}, \text{\small \hyperlink{selfdestruct}{SELFDESTRUCT}} \} &\\
+\varnothing \quad\quad\ \text{otherwise}&
+\end{cases}
+\end{equation}
+
+The data-returning halt operations, \hyperlink{RETURN}{\text{\small RETURN}} and \text{\small REVERT}, have a special function $H_{\text{\tiny RETURN}}$. Note also the difference between the empty sequence and the empty set as discussed \hyperlink{empty_sequence_vs_empty_set}{here}.
+
+\subsection{The Execution Cycle}
+
+Stack items are added or removed from the left-most, lower-indexed portion of the series; all other items remain unchanged:
+\begin{eqnarray}
+O\big((\boldsymbol{\sigma}, \boldsymbol{\mu}, A, I)\big) & \equiv & (\boldsymbol{\sigma}', \boldsymbol{\mu}', A', I) \\
+\Delta & \equiv & \mathbf{\alpha}_{w} - \mathbf{\delta}_{w} \\
+\lVert\boldsymbol{\mu}'_{\mathbf{s}}\rVert & \equiv & \lVert\boldsymbol{\mu}_{\mathbf{s}}\rVert + \Delta \\
+\quad \forall x \in [\mathbf{\alpha}_{w}, \lVert\boldsymbol{\mu}'_{\mathbf{s}}\rVert): \boldsymbol{\mu}'_{\mathbf{s}}[x] & \equiv & \boldsymbol{\mu}_{\mathbf{s}}[x-\Delta]
+\end{eqnarray}
+
+The gas is reduced by the instruction's gas cost and for most instructions, the program counter increments on each cycle, for the three exceptions, we assume a function $J$, subscripted by one of two instructions, which evaluates to the according value:
+\begin{eqnarray}
+\quad \boldsymbol{\mu}'_{g} & \equiv & \boldsymbol{\mu}_{g} - C(\boldsymbol{\sigma}, \boldsymbol{\mu}, I) \label{eq:mu_pc}\\
+\quad \boldsymbol{\mu}'_{\mathrm{pc}} & \equiv & \begin{cases}
+\hyperlink{JUMP}{J_{\text{JUMP}}}(\boldsymbol{\mu}) & \text{if} \quad w = \text{\small JUMP} \\
+\hyperlink{JUMPI}{J_{\text{JUMPI}}}(\boldsymbol{\mu}) & \text{if} \quad w = \text{\small JUMPI} \\
+N(\boldsymbol{\mu}_{\mathrm{pc}}, w) & \text{otherwise}
+\end{cases}
+\end{eqnarray}
+
+In general, we assume the memory, self-destruct set and system state don't change:
+\begin{eqnarray}
+\boldsymbol{\mu}'_{\mathbf{m}} & \equiv & \boldsymbol{\mu}_{\mathbf{m}} \\
+\boldsymbol{\mu}'_{\mathrm{i}} & \equiv & \boldsymbol{\mu}_{\mathrm{i}} \\
+A' & \equiv & A \\
+\boldsymbol{\sigma}' & \equiv & \boldsymbol{\sigma}
+\end{eqnarray}
+
+However, instructions do typically alter one or several components of these values. Altered components listed by instruction are noted in Appendix \ref{app:vm}, alongside values for $\alpha$ and $\delta$ and a formal description of the gas requirements.
+
+\section{Blocktree to Blockchain} \label{ch:ghost}
+
+The canonical blockchain is a path from root to leaf through the entire block tree. In order to have consensus over which path it is, conceptually we identify the path that has had the most computation done upon it, or, the \textit{heaviest} path. Clearly one factor that helps determine the heaviest path is the block number of the leaf, equivalent to the number of blocks, not counting the unmined \hyperlink{Genesis_Block}{genesis block}, in the path. The longer the path, the greater the total mining effort that must have been done in order to arrive at the leaf. This is akin to existing schemes, such as that employed in Bitcoin-derived protocols.
+
+Since a block header includes the difficulty, the header alone is enough to validate the computation done. Any block contributes toward the total computation or \textit{total difficulty} of a chain.
+
+Thus we define the total difficulty of block $B$ recursively as:
+\begin{eqnarray}
+B_{\mathrm{t}} & \equiv & B'_{\mathrm{t}} + B_{\mathrm{d}} \\
+B' & \equiv & P(B_{H})
+\end{eqnarray}
+
+As such given a block $B$, $B_{\mathrm{t}}$ is its total difficulty, $B'$ is its parent block and $B_{\mathrm{d}}$ is its difficulty.
+
+\section{Block Finalisation} \label{ch:finalisation}
+
+The process of finalising a block involves four stages:
+
+\begin{enumerate}
+\item Validate (or, if mining, determine) ommers;
+\item validate (or, if mining, determine) transactions;
+\item apply rewards;
+\item verify (or, if mining, compute a valid) state and \hyperlink{block_nonce}{block nonce}.
+\end{enumerate}
+
+\subsection{Ommer Validation}
+
+The validation of \hyperlink{ommer_block_headers_B__U}{ommer headers} means nothing more than verifying that each ommer header is both a valid header and satisfies the relation of $N$th-generation ommer to the present block where $N \leq 6$. The maximum of ommer headers is two. Formally:
+\begin{equation}
+\lVert B_{\mathbf{U}} \rVert \leqslant 2 \bigwedge_{\mathbf{U} \in B_{\mathbf{U}}} \hyperlink{block_header_validity_function}{V({\mathbf{U}}})\; \wedge \; k({\mathbf{U}}, P(\mathbf{B}_{\mathbf{H}})_{\mathbf{H}}, 6)
+\end{equation}
+
+where $k$ denotes the ``is-kin'' property:
+\begin{equation}
+k(U, H, n) \equiv \begin{cases} false & \text{if} \quad n = 0 \\
+s(U, H) &\\
+\quad \vee \; k(U, P(H)_{H}, n - 1) & \text{otherwise}
+\end{cases}
+\end{equation}
+
+and $s$ denotes the ``is-sibling'' property:
+\begin{equation}
+s(U, H) \equiv (P(H) = P(U)\; \wedge \; H \neq U \; \wedge \; U \notin B(H)_{\mathbf{U}})
+\end{equation}
+where $B(H)$ and $P(H)$ are the block and the parent block of the corresponding header $H$ respectively.
+
+\subsection{Transaction Validation}
+
+%where $s[i]$ equals the root of the state trie immediately after the execution of the transaction $B_{\mathbf{T}}[i]$, and $g[i]$ the total gas used immediately after said transaction.
+
+The given \textbf{gasUsed} must correspond faithfully to the transactions listed: \hyperlink{H__g}{${B_{H}}_{\mathrm{g}}$}, the total gas used in the block, must be equal to the accumulated gas used according to the final transaction:
+\begin{equation}
+\hyperlink{H__g}{B_{H}}_{\mathrm{g}} = \hyperlink{ell}{\ell}(\hyperlink{R__u}{\mathbf{R})_{\mathrm{u}}}
+\end{equation}
+
+\subsection{Reward Application}
+
+The application of rewards to a block involves raising the balance of the accounts of the beneficiary ad
