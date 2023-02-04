@@ -923,4 +923,98 @@ A \equiv (\mathbf{s}, \mathbf{l}, \mathbf{t}, r)
 
 \subsection{Execution Overview}
 
-We must now define the $\Xi$ function. In most practical implementations this will be modelled as an iterative progression of the pair comprising the full system state, $\boldsymbol{\sigma}$ and the machine state, $\boldsymbol{\mu}$. Formally, we define it recursively with a function $X$. This uses an iterator function $O$ (which defines the result of a single cycle of the state machine) together with functions \hyperlink{zhalt}{$Z$} which determines if the present state is an \hyperlink{zhalt}{exceptional halting} state of the machine and \hyperlink{hhalt}{$H$}, specifying the output dat
+We must now define the $\Xi$ function. In most practical implementations this will be modelled as an iterative progression of the pair comprising the full system state, $\boldsymbol{\sigma}$ and the machine state, $\boldsymbol{\mu}$. Formally, we define it recursively with a function $X$. This uses an iterator function $O$ (which defines the result of a single cycle of the state machine) together with functions \hyperlink{zhalt}{$Z$} which determines if the present state is an \hyperlink{zhalt}{exceptional halting} state of the machine and \hyperlink{hhalt}{$H$}, specifying the output data of the instruction if and only if the present state is a \hyperlink{hhalt}{normal halting} state of the machine.
+
+\hypertarget{empty_sequence_vs_empty_set}{}The empty sequence, denoted $()$, is not equal to the empty set, denoted $\varnothing$; this is important when interpreting the output of $H$, which evaluates to $\varnothing$ when execution is to continue but a series (potentially empty) when execution should halt.
+\begin{eqnarray}
+\Xi(\boldsymbol{\sigma}, g, I, T) & \equiv & (\boldsymbol{\sigma}'\!, \boldsymbol{\mu}'_{\mathrm{g}}, A, \mathbf{o}) \\
+(\boldsymbol{\sigma}', \boldsymbol{\mu}'\!, A, ..., \mathbf{o}) & \equiv & X\big((\boldsymbol{\sigma}, \boldsymbol{\mu}, A^0\!, I)\big) \\
+\boldsymbol{\mu}_{\mathrm{g}} & \equiv & g \\
+\boldsymbol{\mu}_{\mathrm{pc}} & \equiv & 0 \\
+\boldsymbol{\mu}_{\mathbf{m}} & \equiv & (0, 0, ...) \\
+\boldsymbol{\mu}_{\mathrm{i}} & \equiv & 0 \\
+\boldsymbol{\mu}_{\mathbf{s}} & \equiv & () \\
+\boldsymbol{\mu}_{\mathbf{o}} & \equiv & ()
+\end{eqnarray}
+\begin{equation} \label{eq:X-def}
+X\big( (\boldsymbol{\sigma}, \boldsymbol{\mu}, A, I) \big) \equiv \begin{cases}
+\big(\varnothing, \boldsymbol{\mu}, A^0, I, \varnothing\big) & \text{if} \quad Z(\boldsymbol{\sigma}, \boldsymbol{\mu}, I) \\
+\big(\varnothing, \boldsymbol{\mu}', A^0, I, \mathbf{o}\big) & \text{if} \quad w = \text{\small REVERT} \\
+O(\boldsymbol{\sigma}, \boldsymbol{\mu}, A, I) \cdot \mathbf{o} & \text{if} \quad \mathbf{o} \neq \varnothing \\
+X\big(O(\boldsymbol{\sigma}, \boldsymbol{\mu}, A, I)\big) & \text{otherwise} \\
+\end{cases}
+\end{equation}
+
+where
+\begin{eqnarray}
+\mathbf{o} & \equiv & H(\boldsymbol{\mu}, I) \\
+(a, b, c, d) \cdot e & \equiv & (a, b, c, d, e) \\
+\boldsymbol{\mu}' & \equiv & \boldsymbol{\mu}\ \text{except:} \\
+\boldsymbol{\mu}'_{\mathrm{g}} & \equiv & \boldsymbol{\mu}_{\mathrm{g}} - C(\boldsymbol{\sigma}, \boldsymbol{\mu}, I)
+\end{eqnarray}
+
+Note that, when we evaluate $\Xi$, we drop the fourth element $I'$ and extract the remaining gas $\boldsymbol{\mu}'_{\mathrm{g}}$ from the resultant machine state $\boldsymbol{\mu}'$.
+
+$X$ is thus cycled (recursively here, but implementations are generally expected to use a simple iterative loop) until either \hyperlink{zhalt}{$Z$} becomes true indicating that the present state is exceptional and that the machine must be halted and any changes discarded or until \hyperlink{hhalt}{$H$} becomes a series (rather than the empty set) indicating that the machine has reached a controlled halt.
+
+\subsubsection{Machine State}
+The machine state $\boldsymbol{\mu}$ is defined as the tuple $(g, pc, \mathbf{m}, i, \mathbf{s})$ which are the gas available, the program counter $pc \in \mathbb{N}_{256}$ , the memory contents, the active number of words in memory (counting continuously from position 0), and the stack contents. The memory contents $\boldsymbol{\mu}_{\mathbf{m}}$ are a series of zeroes of size $2^{256}$.
+
+For the ease of reading, the instruction mnemonics, written in small-caps (\eg \space {\small ADD}), should be interpreted as their numeric equivalents; the full table of instructions and their specifics is given in Appendix \ref{app:vm}.
+
+For the purposes of defining $Z$, $H$ and $O$, we define $w$ as the current operation to be executed:
+\begin{equation}\label{eq:currentoperation}
+w \equiv \begin{cases} I_{\mathbf{b}}[\boldsymbol{\mu}_{\mathrm{pc}}] & \text{if} \quad \boldsymbol{\mu}_{\mathrm{pc}} < \lVert I_{\mathbf{b}} \rVert \\
+\text{\hyperlink{stop}{\small STOP}} & \text{otherwise}
+\end{cases}
+\end{equation}
+
+We also assume the fixed amounts of $\mathbf{\delta}$ and $\mathbf{\alpha}$, specifying the stack items removed and added, both subscriptable on the instruction and an instruction cost function $C$ evaluating to the full cost, in gas, of executing the given instruction.
+
+\subsubsection{Exceptional Halting}\hypertarget{Exceptional_Halting_function_Z}{}\linkdest{zhalt}
+
+The exceptional halting function $Z$ is defined as:
+\begin{equation}
+Z(\boldsymbol{\sigma}, \boldsymbol{\mu}, I) \equiv
+\begin{array}[t]{l}
+\boldsymbol{\mu}_g < C(\boldsymbol{\sigma}, \boldsymbol{\mu}, I) \quad \vee \\
+\mathbf{\delta}_w = \varnothing \quad \vee \\
+\lVert\boldsymbol{\mu}_\mathbf{s}\rVert < \mathbf{\delta}_w \quad \vee \\
+( w = \text{\small JUMP} \quad \wedge \quad \boldsymbol{\mu}_\mathbf{s}[0] \notin D(I_\mathbf{b}) ) \quad \vee \\
+( w = \text{\small JUMPI} \quad \wedge \quad \boldsymbol{\mu}_\mathbf{s}[1] \neq 0 \quad \wedge \\
+\quad \boldsymbol{\mu}_\mathbf{s}[0] \notin D(I_\mathbf{b}) ) \quad \vee \\
+( w = \text{\small RETURNDATACOPY} \wedge \\ \quad \boldsymbol{\mu}_{\mathbf{s}}[1] + \boldsymbol{\mu}_{\mathbf{s}}[2] > \lVert\boldsymbol{\mu}_{\mathbf{o}}\rVert) \quad \vee \\
+\lVert\boldsymbol{\mu}_\mathbf{s}\rVert - \mathbf{\delta}_w + \mathbf{\alpha}_w > 1024 \vee
+ (\neg I_{\mathrm{w}} \wedge W(w, \boldsymbol{\mu}))
+\end{array}
+\end{equation}
+where
+\begin{equation}
+W(w, \boldsymbol{\mu}) \equiv \\
+\begin{array}[t]{l}
+w \in \{\text{\small CREATE}, \text{\small SSTORE},\\ \text{\small SELFDESTRUCT}\} \ \vee \\
+\text{\small LOG0} \le w \wedge w \le \text{\small LOG4} \quad \vee \\
+w \in \{\text{\small CALL}, \text{\small CALLCODE}\} \wedge \boldsymbol{\mu}_{\mathbf{s}}[2] \neq 0
+\end{array}
+\end{equation}
+
+This states that the execution is in an exceptional halting state if there is insufficient gas, if the instruction is invalid (and therefore its $\delta$ subscript is undefined), if there are insufficient stack items, if a {\small JUMP}/{\small JUMPI} destination is invalid, the new stack size would be larger than 1024 or state modification is attempted during a static call. The astute reader will realise that this implies that no instruction can, through its execution, cause an exceptional halt.
+
+\subsubsection{Jump Destination Validity}
+
+We previously used $D$ as the function to determine the set of valid jump destinations given the code that is being run. We define this as any position in the code occupied by a {\small JUMPDEST} instruction.
+
+All such positions must be on valid instruction boundaries, rather than sitting in the data portion of {\small PUSH} operations and must appear within the explicitly defined portion of the code (rather than in the implicitly defined \hyperlink{stop}{{\small STOP}} operations that trail it).
+
+Formally:
+\begin{equation}
+D(\mathbf{c}) \equiv D_{J}(\mathbf{c}, 0)
+\end{equation}
+
+where:
+\begin{equation}
+D_{J}(\mathbf{c}, i) \equiv \begin{cases}
+\{\} & \text{if} \quad i \geqslant |\mathbf{c}|  \\
+\{ i \} \cup D_{J}(\mathbf{c}, N(i, \mathbf{c}[i])) & \\
+\quad\quad\text{if} \quad \mathbf{c}[i] = \text{\small JUMPDEST} \\
+D_{J}(\mathbf{c}, N(i, \mathbf{c}[i])) & \text{oth
