@@ -1129,4 +1129,86 @@ The given \textbf{gasUsed} must correspond faithfully to the transactions listed
 
 \subsection{Reward Application}
 
-The application of rewards to a block involves raising the balance of the accounts of the beneficiary ad
+The application of rewards to a block involves raising the balance of the accounts of the beneficiary address of the block and each ommer by a certain amount. We raise the block's beneficiary account by \hyperlink{R__block}{$R_{\mathrm{block}}$}; for each ommer, we raise the block's beneficiary by an additional $\frac{1}{32}$ of the block reward and the beneficiary of the ommer gets rewarded depending on the block number.\hypertarget{Omega}{} Formally we define the function $\Omega$:
+\begin{eqnarray}
+\\ \nonumber
+\Omega(B, \boldsymbol{\sigma}) & \equiv & \boldsymbol{\sigma}': \boldsymbol{\sigma}' = \boldsymbol{\sigma} \quad \text{except:} \\
+\qquad\boldsymbol{\sigma}'[{\mathbf{B}_{H}}_{\mathrm{c}}]_{\mathrm{b}} & = & \boldsymbol{\sigma}[{\mathbf{B}_{H}}_{\mathrm{c}}]_{\mathrm{b}} + \left(1 + \frac{\lVert \mathbf{B}_{\mathbf{U}}\rVert}{32}\right)R_{\mathrm{block}} \\
+\qquad\forall_{\mathbf{U} \in \mathbf{B}_{\mathbf{U}}}: \\ \nonumber
+\boldsymbol{\sigma}'[\mathbf{U}_{\mathrm{c}}] & = & \begin{cases}
+\varnothing &\text{if}\ \boldsymbol{\sigma}[\mathbf{U}_{\mathrm{c}}] = \varnothing\ \wedge\ R = 0 \\
+\mathbf{a}' &\text{otherwise}
+\end{cases} \\
+\mathbf{a}' &\equiv& (\boldsymbol{\sigma}[U_{\mathrm{c}}]_{\mathrm{n}}, \boldsymbol{\sigma}[U_{\mathrm{c}}]_{\mathrm{b}} + R, \boldsymbol{\sigma}[U_{\mathrm{c}}]_{\mathbf{s}}, \boldsymbol{\sigma}[U_{\mathrm{c}}]_{\mathrm{c}}) \\
+R & \equiv & \left(1 + \frac{1}{8} (U_{\mathrm{i}} - {B_{H}}_{\mathrm{i}})\right) R_{\mathrm{block}}
+\end{eqnarray}
+
+If there are collisions of the beneficiary addresses between ommers and the block (i.e. two ommers with the same beneficiary address or an ommer with the same beneficiary address as the present block), additions are applied cumulatively.
+
+\hypertarget{block_reward_R__block}{}\linkdest{R__block}We define the block reward as 3 Ether:
+\begin{equation}
+\text{Let} \quad R_{\mathrm{block}} = 3 \times 10^{18}
+\end{equation}
+
+\subsection{State \& Nonce Validation}\label{sec:statenoncevalidation}
+
+\hypertarget{Gamma}{}We may now define the function, $\Gamma$, that maps a block $B$ to its initiation state:
+\begin{equation}
+\Gamma(B) \equiv \begin{cases}
+\boldsymbol{\sigma}_0 kern 10pc \ \text{if} \quad P(B_{H}) = \varnothing \\
+\boldsymbol{\sigma}_{\mathrm{i}}: \mathtt{\hyperlink{trie}{TRIE}}(L_{S}(\boldsymbol{\sigma}_{\mathrm{i}})) = {P(B_{H})_{H}}_{\mathrm{r}} \quad\text{otherwise}
+\end{cases}
+\end{equation}
+
+Here, $\mathtt{TRIE}(L_{S}(\boldsymbol{\sigma}_{\mathrm{i}}))$ means the hash of the root node of a trie of state $\boldsymbol{\sigma}_{\mathrm{i}}$; it is assumed that implementations will store this in the state database, which is trivial and efficient since the trie is by nature an immutable data structure.
+
+\hypertarget{Phi}{}And finally we define $\Phi$, the block transition function, which maps an incomplete block $B$ to a complete block $B'$:
+\begin{eqnarray}
+\Phi(B) & \equiv & B': \quad B' = B^* \quad \text{except:} \\
+B'_{\mathrm{n}} & = & n: \quad x \leqslant \frac{2^{256}}{\hyperlink{H__d}{H_{\mathrm{d}}}} \\
+B'_{\mathrm{m}} & = & m \quad \text{with } (x, m) = \mathtt{PoW}(B^*_{\hyperlink{H_cancel_n}{\hcancel{n}}}, n, \mathbf{d}) \\
+B^* & \equiv & B \quad \text{except:} \quad {\hyperlink{Transaction Receipt}{B^*_{\mathrm{r}}}} = \hyperlink{r}{r}(\hyperlink{Pi}{\Pi}(\Gamma(B), B))
+\end{eqnarray}
+
+With $\mathbf{d}$ being a dataset as specified in appendix \ref{app:ethash}.
+
+As specified at the beginning of the present work, \hyperlink{Pi}{$\Pi$} is the state-transition function, which is defined in terms of \hyperlink{Omega}{$\Omega$}, the block finalisation function and \hyperlink{Upsilon_state_transition}{$\Upsilon$}, the transaction-evaluation function, both now well-defined.
+
+As previously detailed, $\mathbf{R}[n]_{\mathrm{z}}$, $\mathbf{R}[n]_{\mathbf{l}}$ and $\mathbf{R}[n]_{\mathrm{u}}$ are the $n$th corresponding status code, logs and cumulative gas used after each transaction ($\mathbf{R}[n]_{\mathrm{b}}$, the fourth component in the tuple, has already been defined in terms of the logs). We also define the $n$th state $\boldsymbol{\sigma}[n]$, which is defined simply as the state resulting from applying the corresponding transaction to the state resulting from the previous transaction (or the block's initial state in the case of the first such transaction):
+\begin{equation}
+\boldsymbol{\sigma}[n] = \begin{cases} \hyperlink{Gamma}{\Gamma}(B) & \text{if} \quad n < 0 \\ \hyperlink{Upsilon}{\Upsilon}(\boldsymbol{\sigma}[n - 1], B_{\mathbf{T}}[n]) & \text{otherwise} \end{cases}
+\end{equation}
+
+In the case of $B_{\mathbf{R}}[n]_{\mathrm{u}}$, we take a similar approach defining each item as the gas used in evaluating the corresponding transaction summed with the previous item (or zero, if it is the first), giving us a running total:
+\begin{equation}
+\mathbf{R}[n]_{\mathrm{u}} = \begin{cases} 0 & \text{if} \quad n < 0 \\
+\begin{array}[b]{l}
+\Upsilon^g(\boldsymbol{\sigma}[n - 1], B_{\mathbf{T}}[n])\\ \quad + \mathbf{R}[n-1]_{\mathrm{u}}
+\end{array}
+ & \text{otherwise} \end{cases}
+\end{equation}
+
+For $\mathbf{R}[n]_{\mathbf{l}}$, we utilise the \hyperlink{Upsilon_pow_l}{$\Upsilon^\mathbf{l}$} function that we conveniently defined in the transaction execution function.
+\begin{equation}
+\mathbf{R}[n]_{\mathbf{l}} =
+\Upsilon^{\mathbf{l}}(\boldsymbol{\sigma}[n - 1], B_{\mathbf{T}}[n])
+\end{equation}
+
+We define \hyperlink{Upsilon_pow_z}{$\mathbf{R}[n]_{\mathrm{z}}$} in a similar manner.
+\begin{equation}
+\mathbf{R}[n]_{\mathrm{z}} =
+\Upsilon^{\mathrm{z}}(\boldsymbol{\sigma}[n - 1], B_{\mathbf{T}}[n])
+\end{equation}
+
+\hypertarget{Pi}{}Finally, we define $\Pi$ as the new state given the block reward function $\hyperlink{Omega}{\Omega}$ applied to the final transaction's resultant state, $\hyperlink{ell}{\ell}(\boldsymbol{\sigma})$:
+\begin{equation}
+\Pi(\boldsymbol{\sigma}, B) \equiv \hyperlink{Omega}{\Omega}(B, \ell(\boldsymbol{\sigma}))
+\end{equation}
+
+Thus the complete block-transition mechanism is defined, except for $\mathtt{PoW}$, the proof-of-work function.
+
+\subsection{Mining Proof-of-Work} \label{ch:pow}
+
+The mining proof-of-work (PoW) exists as a cryptographically secure nonce that proves beyond reasonable doubt that a particular amount of computation has been expended in the determination of some token value $n$. It is utilised to enforce the blockchain security by giving meaning and credence to the notion of difficulty (and, by extension, total difficulty). However, since mining new blocks comes with an attached reward, the proof-of-work not only functions as a method of securing confidence that the blockchain will remain canonical into the future, but also as a wealth distribution mechanism.
+
+For both reasons, there are two important goal
