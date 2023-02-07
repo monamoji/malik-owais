@@ -1391,4 +1391,73 @@ It is defined as the function $\mathtt{HP}$ which maps from a sequence of nibble
 \begin{eqnarray}
 \mathtt{HP}(\mathbf{x}, t): \mathbf{x} \in \mathbb{Y} & \equiv & \begin{cases}
 (16f(t), 16\mathbf{x}[0] + \mathbf{x}[1], 16\mathbf{x}[2] + \mathbf{x}[3], ...) &
-\text{
+\text{if} \quad \lVert \mathbf{x} \rVert \; \text{is even} \\
+(16(f(t) + 1) + \mathbf{x}[0], 16\mathbf{x}[1] + \mathbf{x}[2], 16\mathbf{x}[3] + \mathbf{x}[4], ...) &
+\text{otherwise}
+\end{cases} \\
+f(t) & \equiv & \begin{cases} 2 & \text{if} \quad t \neq 0 \\ 0 & \text{otherwise} \end{cases}
+\end{eqnarray}
+
+Thus the high nibble of the first byte contains two flags; the lowest bit encoding the oddness of the length and the second-lowest encoding the flag $t$. The low nibble of the first byte is zero in the case of an even number of nibbles and the first nibble in the case of an odd number. All remaining nibbles (now an even number) fit properly into the remaining bytes.
+
+\section{Modified Merkle Patricia Tree}\label{app:trie}\hypertarget{trie}{}
+The modified Merkle Patricia tree (trie) provides a persistent data structure to map between arbitrary-length binary data (byte arrays). It is defined in terms of a mutable data structure to map between 256-bit binary fragments and arbitrary-length binary data, typically implemented as a database. The core of the trie, and its sole requirement in terms of the protocol specification is to provide a single value that identifies a given set of key-value pairs, which may be either a 32-byte sequence or the empty byte sequence. It is left as an implementation consideration to store and maintain the structure of the trie in a manner that allows effective and efficient realisation of the protocol.
+
+Formally, we assume the input value $\mathfrak{I}$, a set containing pairs of byte sequences:
+\begin{equation}
+\mathfrak{I} = \{ (\mathbf{k}_0 \in \mathbb{B}, \mathbf{v}_0 \in \mathbb{B}), (\mathbf{k}_1 \in \mathbb{B}, \mathbf{v}_1 \in \mathbb{B}), ... \}
+\end{equation}
+
+When considering such a sequence, we use the common numeric subscript notation to refer to a tuple's key or value, thus:
+\begin{equation}
+\forall_{\mathbf{I} \in \mathfrak{I}} I \equiv (I_0, I_1)
+\end{equation}
+
+Any series of bytes may also trivially be viewed as a series of nibbles, given an endian-specific notation; here we assume big-endian. Thus:
+\begin{eqnarray}
+y(\mathfrak{I}) & = & \{ (\mathbf{k}_0' \in \mathbb{Y}, \mathbf{v}_0 \in \mathbb{B}), (\mathbf{k}_1' \in \mathbb{Y}, \mathbf{v}_1 \in \mathbb{B}), ... \} \\
+\forall_{n} \quad \forall_{i: i < 2\lVert\mathbf{k}_{n}\rVert} \quad \mathbf{k}_{n}'[i] & \equiv &
+\begin{cases}
+\lfloor \mathbf{k}_{n}[i \div 2] \div 16 \rfloor & \text{if} \; i \; \text{is even} \\
+\mathbf{k}_{n}[\lfloor i \div 2 \rfloor] \bmod 16 & \text{otherwise}
+\end{cases}
+\end{eqnarray}
+
+We define the function $\texttt{TRIE}$, which evaluates to the root of the trie that represents this set when encoded in this structure:
+\begin{equation}
+\texttt{TRIE}(\mathfrak{I}) \equiv \texttt{KEC}(c(\mathfrak{I}, 0))
+\end{equation}
+
+We also assume a function $n$, the trie's node cap function. When composing a node, we use RLP to encode the structure. As a means of reducing storage complexity, for nodes whose composed RLP is fewer than 32 bytes, we store the RLP directly; for those larger we assert prescience of the byte array whose Keccak hash evaluates to our reference. Thus we define in terms of $c$, the node composition function:
+\begin{equation}
+n(\mathfrak{I}, i) \equiv \begin{cases}
+() & \text{if} \quad \mathfrak{I} = \varnothing \\
+c(\mathfrak{I}, i) & \text{if} \quad \lVert c(\mathfrak{I}, i)\rVert < 32 \\
+\texttt{KEC}(c(\mathfrak{I}, i)) & \text{otherwise}
+\end{cases}
+\end{equation}
+
+In a manner similar to a radix tree, when the trie is traversed from root to leaf, one may build a single key-value pair. The key is accumulated through the traversal, acquiring a single nibble from each branch node (just as with a radix tree). Unlike a radix tree, in the case of multiple keys sharing the same prefix or in the case of a single key having a unique suffix, two optimising nodes are provided. Thus while traversing, one may potentially acquire multiple nibbles from each of the other two node types, extension and leaf. There are three kinds of nodes in the trie:
+\begin{description}
+\item[Leaf] A two-item structure whose first item corresponds to the nibbles in the key not already accounted for by the accumulation of keys and branches traversed from the root. The hex-prefix encoding method is used and the second parameter to the function is required to be $true$.
+\item[Extension] A two-item structure whose first item corresponds to a series of nibbles of size greater than one that are shared by at least two distinct keys past the accumulation of the keys of nibbles and the keys of branches as traversed from the root. The hex-prefix encoding method is used and the second parameter to the function is required to be $false$.
+\item[Branch] A 17-item structure whose first sixteen items correspond to each of the sixteen possible nibble values for the keys at this point in their traversal. The 17th item is used in the case of this being a terminator node and thus a key being ended at this point in its traversal.
+\end{description}
+
+A branch is then only used when necessary; no branch nodes may exist that contain only a single non-zero entry. We may formally define this structure with the structural composition function $c$:
+\begin{equation}
+c(\mathfrak{I}, i) \equiv \begin{cases}
+\texttt{RLP}\Big( \big(\texttt{HP}(I_0[i .. (\lVert I_0\rVert - 1)], true), I_1 \big) \Big) & \text{if} \quad \lVert \mathfrak{I} \rVert = 1 \quad \text{where} \; \exists I: I \in \mathfrak{I} \\
+\texttt{RLP}\Big( \big(\texttt{HP}(I_0[i .. (j - 1)], false), n(\mathfrak{I}, j) \big) \Big) & \text{if} \quad i \ne j \quad \text{where} \; j = \arg \max_{x} : \exists \mathbf{l}: \lVert \mathbf{l} \rVert = x : \forall_{I \in \mathfrak{I}}: I_0[0 .. (x - 1)] = \mathbf{l} \\
+\texttt{RLP}\Big( (u(0), u(1), ..., u(15), v) \Big) & \text{otherwise} \quad \text{where} \begin{array}[t]{rcl}
+u(j) & \equiv & n(\{ I : I \in \mathfrak{I} \wedge I_0[i] = j \}, i + 1) \\
+v & = & \begin{cases}
+I_1 & \text{if} \quad \exists I: I \in \mathfrak{I} \wedge \lVert I_0 \rVert = i \\
+() & \text{otherwise}
+\end{cases}
+\end{array}
+\end{cases}
+\end{equation}
+
+\subsection{Trie Database}
+Thus no explicit assumptions are made concerning what data is stored and what is not, since that is an implementation-specific consideration; we simply define the identity function mapping the key-value set $\mathfrak{I}$ to a 32-byte hash and assert that only a single such hash exists for any $\mathfrak{I}$, which though not strictly true is accurate within acceptable precision given the Keccak hash's collision resistance. In 
