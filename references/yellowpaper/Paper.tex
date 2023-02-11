@@ -1460,4 +1460,105 @@ I_1 & \text{if} \quad \exists I: I \in \mathfrak{I} \wedge \lVert I_0 \rVert = i
 \end{equation}
 
 \subsection{Trie Database}
-Thus no explicit assumptions are made concerning what data is stored and what is not, since that is an implementation-specific consideration; we simply define the identity function mapping the key-value set $\mathfrak{I}$ to a 32-byte hash and assert that only a single such hash exists for any $\mathfrak{I}$, which though not strictly true is accurate within acceptable precision given the Keccak hash's collision resistance. In 
+Thus no explicit assumptions are made concerning what data is stored and what is not, since that is an implementation-specific consideration; we simply define the identity function mapping the key-value set $\mathfrak{I}$ to a 32-byte hash and assert that only a single such hash exists for any $\mathfrak{I}$, which though not strictly true is accurate within acceptable precision given the Keccak hash's collision resistance. In reality, a sensible implementation will not fully recompute the trie root hash for each set.
+
+A reasonable implementation will maintain a database of nodes determined from the computation of various tries or, more formally, it will memoise the function $c$. This strategy uses the nature of the trie to both easily recall the contents of any previous key-value set and to store multiple such sets in a very efficient manner. Due to the dependency relationship, Merkle-proofs may be constructed with an $O(\log N)$ space requirement that can demonstrate a particular leaf must exist within a trie of a given root hash.
+
+\section{Precompiled Contracts}\label{app:precompiled}
+
+For each precompiled contract, we make use of a template function, $\Xi_{\mathtt{PRE}}$, which implements the out-of-gas checking.
+\begin{equation} \label{eq:pre}
+\Xi_{\mathtt{PRE}}(\boldsymbol{\sigma}, g, I, T) \equiv \begin{cases}
+(\varnothing, 0, A^0, ()) & \text{if} \quad g < g_{\mathrm{r}} \\
+(\boldsymbol\sigma, g - g_{\mathrm{r}}, A^0, \mathbf{o}) & \text{otherwise}\end{cases}
+\end{equation}
+
+The precompiled contracts each use these definitions and provide specifications for the $\mathbf{o}$ (the output data) and $g_{\mathrm{r}}$, the gas requirements.
+
+We define $\Xi_{\mathtt{ECREC}}$ as a precompiled contract for the elliptic curve digital signature algorithm (ECDSA) public key recovery function (ecrecover). See Appendix \ref{app:signing} for the definition of the function $\mathtt{ECDSARECOVER}$. We also define $\mathbf{d}$ to be the input data, well-defined for an infinite length by appending zeroes as required. In the case of an invalid signature ($\mathtt{ECDSARECOVER}(h, v, r, s) = \varnothing$), we return no output.
+
+\begin{eqnarray}
+\Xi_{\mathtt{ECREC}} &\equiv& \Xi_{\mathtt{PRE}} \quad \text{where:} \\
+g_{\mathrm{r}} &=& 3000\\
+|\mathbf{o}| &=& \begin{cases} 0 & \text{if} \quad \mathtt{ECDSARECOVER}(h, v, r, s) = \varnothing\\ 32 & \text{otherwise} \end{cases}\\
+\text{if} \quad |\mathbf{o}| = 32: &&\\
+\mathbf{o}[0..11] &=& 0 \\
+\mathbf{o}[12..31] &=& \mathtt{KEC}\big(\mathtt{ECDSARECOVER}(h, v, r, s)\big)[12..31] \quad \text{where:}\\
+\mathbf{d}[0..(|\hyperlink{I__d}{I_{\mathbf{d}}}|-1)] &=& I_{\mathbf{d}}\\
+\mathbf{d}[|I_{\mathbf{d}}|..] &=& (0, 0, ...) \\
+h &=& \mathbf{d}[0..31]\\
+v &=& \mathbf{d}[32..63]\\
+r &=& \mathbf{d}[64..95]\\
+s &=& \mathbf{d}[96..127]
+\end{eqnarray}
+
+We define $\Xi_{\mathtt{SHA256}}$ and $\Xi_{\mathtt{RIP160}}$ as precompiled contracts implementing the SHA2-256 and RIPEMD-160 hash functions respectively. Their gas usage is dependent on the input data size, a factor rounded up to the nearest number of words.
+
+\begin{eqnarray}
+\Xi_{\mathtt{SHA256}} &\equiv& \Xi_{\mathtt{PRE}} \quad \text{where:} \\
+g_{\mathrm{r}} &=& 60 + 12\Big\lceil \dfrac{|I_{\mathbf{d}}|}{32} \Big\rceil\\
+\mathbf{o}[0..31] &=& \mathtt{SHA256}(I_{\mathbf{d}})\\
+\Xi_{\mathtt{RIP160}} &\equiv& \Xi_{\mathtt{PRE}} \quad \text{where:} \\
+g_{\mathrm{r}} &=& 600 + 120\Big\lceil \dfrac{|I_{\mathbf{d}}|}{32} \Big\rceil\\
+\mathbf{o}[0..11] &=& 0 \\
+\mathbf{o}[12..31] &=& \mathtt{RIPEMD160}(I_{\mathbf{d}})
+\end{eqnarray}
+
+For the purposes here, we assume we have well-defined standard cryptographic functions for RIPEMD-160 and SHA2-256 of the form:
+
+\begin{eqnarray}
+\mathtt{SHA256}(\mathbf{i} \in \mathbb{B}) & \equiv & o \in \mathbb{B}_{32} \\
+\mathtt{RIPEMD160}(\mathbf{i} \in \mathbb{B}) & \equiv & o \in \mathbb{B}_{20}
+\end{eqnarray}
+
+The fourth contract, the identity function $\Xi_{\mathtt{ID}}$ simply defines the output as the input:
+\begin{eqnarray}
+\Xi_{\mathtt{ID}} &\equiv& \Xi_{\mathtt{PRE}} \quad \text{where:} \\
+g_{\mathrm{r}} &=& 15 + 3\Big\lceil \dfrac{|I_{\mathbf{d}}|}{32} \Big\rceil\\
+\mathbf{o} &=& I_{\mathbf{d}}
+\end{eqnarray}
+
+The fifth contract performs arbitrary-precision exponentiation under modulo. Here, $0 ^ 0$ is taken to be one, and $x \bmod 0$ is zero for all $x$. The first word in the input specifies the number of bytes that the first non-negative integer $B$ occupies. The second word in the input specifies the number of bytes that the second non-negative integer $E$ occupies. The third word in the input specifies the number of bytes that the third non-negative integer $M$ occupies. These three words are followed by $B$, $E$ and $M$. The rest of the input is discarded. Whenever the input is too short, the missing bytes are considered to be zero. The output is encoded big-endian into the same format as $M$'s.
+
+\begin{eqnarray}
+\Xi_{\mathtt{EXPMOD}} &\equiv& \Xi_{\mathtt{PRE}} \quad \text{except:} \\
+g_{\mathrm{r}} &=& \left\lfloor\frac{f\big(\max(\ell_{M},\ell_{B})\big)\max(\ell'_{E},1)}{G_{quaddivisor}}\right\rfloor \\
+f(x) &\equiv& \begin{cases}
+x^2 & \text{if}\ x \le 64 \\[0.5em]
+\left\lfloor\dfrac{x^2}{4}\right\rfloor + 96 x - 3072 & \text{if}\ 64 < x \le 1024 \\[1em]
+\left\lfloor\dfrac{x^2}{16}\right\rfloor + 480x - 199680 & \text{otherwise}
+\end{cases}\\
+\ell'_{E} &=& \begin{cases}
+0 & \text{if}\ \ell_{E}\le 32\wedge E=0 \\
+\lfloor \log_2(E)\rfloor &\text{if}\ \ell_{E}\le 32 \wedge E \neq 0 \\
+8(\ell_{E} - 32) + \lfloor \log_2(i[(96+\ell_{B})..(127+\ell_{B})]) \rfloor & \text{if}\ 32 < \ell_{E} \wedge i[(96 + \ell_{B})..(127 + \ell_{B})]\neq 0 \\
+8(\ell_{E} - 32) & \text{otherwise} \\
+\end{cases} \\
+\mathbf{o} &=& \left(B^E\bmod M\right)\in\mathbb{N}_{8\ell_{M}} \\
+\ell_{B} &\equiv& i[0..31] \\
+\ell_{E} &\equiv& i[32..63] \\
+\ell_{M} &\equiv& i[64..95] \\
+B &\equiv& i[96..(95+\ell_{B})] \\
+E &\equiv& i[(96+\ell_{B})..(95+\ell_{B}+\ell_{E})] \\
+M &\equiv& i[(96+\ell_{B}+\ell_{E})..(95+\ell_{B}+\ell_{E}+\ell_{M})] \\
+i[x] &\equiv& \begin{cases}
+I_{\mathbf{d}}[x] &\text{if}\ x < |I_{\mathbf{d}}| \\
+0 &\text{otherwise}
+\end{cases}
+\end{eqnarray}
+
+\subsection{zkSNARK Related Precompiled Contracts}
+
+We choose two numbers, both of which are prime.
+\begin{eqnarray}
+p &\equiv& 21888242871839275222246405745257275088696311157297823662689037894645226208583 \\
+q &\equiv& 21888242871839275222246405745257275088548364400416034343698204186575808495617
+\end{eqnarray}
+Since $p$ is a prime number, $\{0, 1, \ldots, p - 1\}$ forms a field with addition and multiplication modulo $p$. We call this field $F_{\mathrm{p}}$.
+
+We define a set~$C_1$ with
+\begin{equation}
+C_1\equiv\{(X,Y)\in F_{\mathrm{p}}\times F_{\mathrm{p}}\mid Y^2=X^3+3\}\cup\{(0,0)\}
+\end{equation}
+We define a binary operation $+$ on $C_1$ for distinct elements $(X_1, Y_1), (X_2, Y_2)$ with
+\begin{eqnarray}\label{eq:ec-addition}
