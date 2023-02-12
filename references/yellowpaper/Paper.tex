@@ -1685,4 +1685,100 @@ I_{\mathbf{d}}[x]&\text{if}\ x < |I_{\mathbf{d}}|\\
 We define a precompiled contract for scalar multiplication on $G_1$, where $\bar I_{\mathbf{d}}$ is defined in (\ref{eq:complemented_input}).
 \begin{eqnarray}
 \Xi_{\mathtt{BN\_MUL}}&\equiv&\Xi_{\mathtt{PRE}}\quad\text{except:}\\
-\Xi_{\mathtt{BN\
+\Xi_{\mathtt{BN\_MUL}}(\boldsymbol\sigma,g,I)&=&\left(\varnothing,0,A^0,()\right)\quad\text{if}\ x=\varnothing\\
+g_{\mathrm{r}} &=& 40000\\
+\mathbf{o}&\equiv&\delta_1^{-1}(n\cdot x)\quad\text{where $\cdot$ is the scalar multiplication in $G_1$}\\
+n&\equiv&\bar I_{\mathbf{d}}[0..31]\\
+x&\equiv&\delta_1\left(\bar I_{\mathbf{d}}[32..95]\right)
+\end{eqnarray}
+
+\section{Signing Transactions}\label{app:signing}
+
+The method of signing transactions is similar to the `Electrum style signatures' as defined by \cite{npmElectrum2017}, heading "Managing styles with Radium" in the bullet point list. This method utilises the SECP-256k1 curve as described by \cite{Courtois2014}, and is implemented similarly to as described by \cite{gura2004comparing} on p.~9 of 15, para.~3.
+
+It is assumed that the sender has a valid private key $p_{\mathrm{r}}$, which is a randomly selected positive integer (represented as a byte array of length 32 in big-endian form) in the range \hbox{$[1, \mathtt{secp256k1n} - 1]$}.
+
+We assume the existence of functions $\mathtt{ECDSAPUBKEY}$, $\mathtt{ECDSASIGN}$ and $\mathtt{ECDSARECOVER}$. These are formally defined in the literature, \eg by \cite{ECDSAcerticom}.
+\begin{eqnarray}
+\mathtt{ECDSAPUBKEY}(p_{\mathrm{r}} \in \mathbb{B}_{32}) & \equiv & p_{\mathrm{u}} \in \mathbb{B}_{64} \\
+\linkdest{ECDSASIGN}\mathtt{ECDSASIGN}(e \in \mathbb{B}_{32}, p_{\mathrm{r}} \in \mathbb{B}_{32}) & \equiv & (v \in \mathbb{B}_{1}, r \in \mathbb{B}_{32}, s \in \mathbb{B}_{32}) \\
+\mathtt{ECDSARECOVER}(e \in \mathbb{B}_{32}, v \in \mathbb{B}_{1}, r \in \mathbb{B}_{32}, s \in \mathbb{B}_{32}) & \equiv & p_{\mathrm{u}} \in \mathbb{B}_{64}
+\end{eqnarray}
+
+Where $p_{\mathrm{u}}$ is the public key, assumed to be a byte array of size 64 (formed from the concatenation of two positive integers each $< 2^{256}$), $p_{\mathrm{r}}$ is the private key, a byte array of size 32 (or a single positive integer in the aforementioned range) and $e$ is the hash of the transaction, \hyperlink{h_of_T}{$h(T)$}. It is assumed that \hypertarget{v}{}$v$ is the `recovery identifier'. The recovery identifier is a 1 byte value specifying the parity and finiteness of the coordinates of the curve point for which $r$ is the x-value; this value is in the range of $[27, 30]$, however we declare the upper two possibilities, representing infinite values, invalid. The value 27 represents an even $y$ value and 28 represents an odd $y$ value.
+
+\newcommand{\slimit}{\ensuremath{\text{s-limit}}}
+
+\linkdest{invalidsig}We declare that an ECDSA signature is invalid unless all the following conditions are true\footnote{A signature of a transaction can be valid not only with a recovery identifier but with some other numbers.  See \hyperlink{T__w}{how the component $T_w$ of a transaction is interpreted.}}:
+\begin{align}
+0 < \linkdest{r}{r} &< \mathtt{secp256k1n} \\
+0 < \linkdest{s}{s} &< \mathtt{secp256k1n} \div 2 + 1 \\
+\hyperlink{v}{v} &\in \{27,28\}
+\end{align}
+where:
+\begin{align}
+\mathtt{secp256k1n} &= 115792089237316195423570985008687907852837564279074904382605163141518161494337
+%\mathtt{secp256k1p} &= 2^{256} - 2^{32} - 977\\
+\end{align}
+
+For a given private key, $p_{\mathrm{r}}$, the Ethereum address $A(p_{\mathrm{r}})$ (a 160-bit value) to which it corresponds is defined as the right most 160-bits of the Keccak hash of the corresponding ECDSA public key:
+\begin{equation}
+A(p_{\mathrm{r}}) = \mathcal{B}_{96..255}\big(\mathtt{KEC}\big( \mathtt{ECDSAPUBKEY}(p_{\mathrm{r}}) \big) \big)
+\end{equation}
+
+\hypertarget{h_of_T}{}The message hash, $h(T)$, to be signed is the Keccak hash of the transaction. Two different flavors of signing schemes are available. One operates without the latter three signature components, formally described as $T_{\mathrm{r}}$, $T_{\mathrm{s}}$ and $T_{\mathrm{w}}$. The other operates on nine elements:
+\begin{eqnarray}
+L_{S}(T) & \equiv & \begin{cases}
+(T_{\mathrm{n}}, T_{\mathrm{p}}, T_{\mathrm{g}}, T_{\mathrm{t}}, T_{\mathrm{v}}, \mathbf{p}) & \text{if} \; v \in \{27, 28\} \\
+(T_{\mathrm{n}}, T_{\mathrm{p}}, T_{\mathrm{g}}, T_{\mathrm{t}}, T_{\mathrm{v}}, \mathbf{p}, \mathtt{chain\_id}, (), ()) & \text{otherwise} \\
+\end{cases} \\
+\nonumber \text{where} \\
+\nonumber \mathbf{p} & \equiv & \begin{cases}
+T_{\mathbf{i}} & \text{if}\ T_{\mathrm{t}} = 0 \\
+T_{\mathbf{d}} & \text{otherwise}
+\end{cases} \\
+h(T) & \equiv & \mathtt{KEC}( L_{S}(T) )
+\end{eqnarray}
+
+The signed transaction $G(T, p_{\mathrm{r}})$ is defined as:
+\begin{eqnarray}
+G(T, p_{\mathrm{r}}) \equiv T \quad \text{except:} \\
+(T_{\mathrm{w}}, T_{\mathrm{r}}, T_{\mathrm{s}}) = \mathtt{ECDSASIGN}(h(T), p_{\mathrm{r}})
+\end{eqnarray}
+
+\hyperlink{T__w_T__r_T__s}{Reiterating from previously}:
+\begin{eqnarray}
+\linkdest{T__r}{T_{\mathrm{r}}} = \hyperlink{r}{r}\\
+\linkdest{T__s}{T_{\mathrm{s}}} = \hyperlink{s}{s}
+\end{eqnarray}
+$\linkdest{T__w}{T_{\mathrm{w}}}$ is either the recovery identifier or `chain identifier doubled plus 35 or 36'.  In the second case, where \hypertarget{v}{}$v$ is the chain identifier doubled plus 35 or 36, the values 35 and 36 assume the role of the `recovery identifier' by specifying the parity of $y$, with the value 35 representing an even value and 36 representing an odd value.
+
+We may then define the sender function $S$ of the transaction as:
+\begin{eqnarray}
+S(T) &\equiv& \mathcal{B}_{96..255}\big(\mathtt{KEC}\big( \mathtt{ECDSARECOVER}(h(T), v_0, T_{\mathrm{r}}, T_{\mathrm{s}}) \big) \big) \\
+v_0 &\equiv& \begin{cases}
+T_{\mathrm{w}} &\text{if}\ T_{\mathrm{w}}\in\{27, 28\} \\
+28 - (T_{\mathrm{w}} \bmod 2) &\text{otherwise}
+\end{cases}
+\end{eqnarray}
+
+The assertion that the sender of a signed transaction equals the address of the signer should be self-evident:
+\begin{equation}
+\forall T: \forall p_{\mathrm{r}}: S(G(T, p_{\mathrm{r}})) \equiv A(p_{\mathrm{r}})
+\end{equation}
+
+\section{Fee Schedule}\label{app:fees}
+
+The fee schedule $G$ is a tuple of 31 scalar values corresponding to the relative costs, in gas, of a number of abstract operations that a transaction may effect.
+
+\begin{tabu}{l r l}
+\toprule
+Name & Value & Description* \\
+\midrule
+$G_{zero}$ & 0 & Nothing paid for operations of the set {\small $W_{zero}$}. \\
+$G_{base}$ & 2 & Amount of gas to pay for operations of the set {\small $W_{base}$}. \\
+$G_{verylow}$ & 3 & Amount of gas to pay for operations of the set {\small $W_{verylow}$}. \\
+$G_{\mathrm{low}}$ & 5 & Amount of gas to pay for operations of the set {\small $W_{\mathrm{low}}$}. \\
+$G_{mid}$ & 8 & Amount of gas to pay for operations of the set {\small $W_{mid}$}. \\
+$G_{\mathrm{high}}$ & 10 & Amount of gas to pay for operations of the set {\small $W_{\mathrm{high}}$}. \\
+$G_{extcode}$ & 700 & Amount of gas to pay for operations of th
