@@ -1871,4 +1871,84 @@ where:
 C_{mem}(a) \equiv G_{memory} \cdot a + \left\lfloor \dfrac{a^2}{512} \right\rfloor
 \end{equation}
 
-with $C_\text{\tiny CALL}$, $C_\text{\tiny SELFDESTRUCT}$ and $C_\text{\tiny SSTORE}$ as specified in the appropriat
+with $C_\text{\tiny CALL}$, $C_\text{\tiny SELFDESTRUCT}$ and $C_\text{\tiny SSTORE}$ as specified in the appropriate section below. We define the following subsets of instructions:
+
+$W_{zero}$ = \{{\small STOP}, {\small RETURN}, {\small REVERT}\}
+
+$W_{base}$ = \{{\small ADDRESS}, {\small ORIGIN}, {\small CALLER}, {\small CALLVALUE}, {\small CALLDATASIZE}, {\small CODESIZE}, {\small GASPRICE}, {\small COINBASE},\newline \noindent\hspace*{1cm} {\small TIMESTAMP}, {\small NUMBER}, {\small DIFFICULTY}, {\small GASLIMIT}, {\small RETURNDATASIZE}, {\small POP}, {\small PC}, {\small MSIZE}, {\small GAS}\}
+
+$W_{verylow}$ = \{{\small ADD}, {\small SUB}, {\small NOT}, {\small LT}, {\small GT}, {\small SLT}, {\small SGT}, {\small EQ}, {\small ISZERO}, {\small AND}, {\small OR}, {\small XOR}, {\small BYTE}, {\small CALLDATALOAD}, \newline \noindent\hspace*{1cm} {\small MLOAD}, {\small MSTORE}, {\small MSTORE8}, {\small PUSH*}, {\small DUP*}, {\small SWAP*}\}
+
+$W_{\mathrm{low}}$ = \{{\small MUL}, {\small DIV}, {\small SDIV}, {\small MOD}, {\small SMOD}, {\small SIGNEXTEND}\}
+
+$W_{mid}$ = \{{\small ADDMOD}, {\small MULMOD}, {\small JUMP}\}
+
+$W_{\mathrm{high}}$ = \{{\small JUMPI}\}
+
+$W_{extcode}$ = \{{\small EXTCODESIZE}\}
+
+Note the memory cost component, given as the product of $G_{memory}$ and the maximum of 0 \& the ceiling of the number of words in size that the memory must be over the current number of words, $\boldsymbol{\mu}_{\mathrm{i}}$ in order that all accesses reference valid memory whether for read or write. Such accesses must be for non-zero number of bytes.
+
+Referencing a zero length range (e.g. by attempting to pass it as the input range to a CALL) does not require memory to be extended to the beginning of the range. $\boldsymbol{\mu}'_{\mathrm{i}}$ is defined as this new maximum number of words of active memory; special-cases are given where these two are not equal.
+
+Note also that $C_{mem}$ is the memory cost function (the expansion function being the difference between the cost before and after). It is a polynomial, with the higher-order coefficient divided and floored, and thus linear up to 724B of memory used, after which it costs substantially more.
+
+While defining the instruction set, we defined the memory-expansion for range function, $M$, thus:
+
+\begin{equation}
+M(s, f, l) \equiv \begin{cases}
+s & \text{if} \quad l = 0 \\
+\max(s, \ceil{ (f + l) \div 32 }) & \text{otherwise}
+\end{cases}
+\end{equation}
+
+Another useful function is ``all but one 64th'' function~$L$ defined as:
+
+\begin{equation}
+L(n) \equiv n - \lfloor n / 64 \rfloor
+\end{equation}
+
+\subsection{Instruction Set}
+\label{subsec:instruction-set}
+
+As previously specified in section \ref{ch:model}, these definitions take place in the final context there. In particular we assume $O$ is the EVM state-progression function and define the terms pertaining to the next cycle's state $(\boldsymbol{\sigma}', \boldsymbol{\mu}')$ such that:
+\begin{equation}
+O(\boldsymbol{\sigma}, \boldsymbol{\mu}, A, I) \equiv (\boldsymbol{\sigma}', \boldsymbol{\mu}', A', I) \quad \text{with exceptions, as noted}
+\end{equation}
+
+Here given are the various exceptions to the state transition rules given in section \ref{ch:model} specified for each instruction, together with the additional instruction-specific definitions of $J$ and $C$. For each instruction, also specified is $\alpha$, the additional items placed on the stack and $\delta$, the items removed from stack, as defined in section \ref{ch:model}.
+
+\begin{tabu}{r l r r l} \savetabu{opcodes}
+\toprule
+\multicolumn{5}{c}{\textbf{0s: Stop and Arithmetic Operations}} \\
+\multicolumn{5}{l}{All arithmetic is modulo $2^{256}$ unless otherwise noted. The zero-th power of zero $0^0$ is defined to be one.} \vspace{5pt} \\
+\textbf{Value} & \textbf{Mnemonic} & $\delta$ & $\alpha$ & \textbf{Description} \vspace{5pt} \\
+\linkdest{stop}{}0x00 & {\small STOP} & 0 & 0 & Halts execution. \\
+\midrule
+0x01 & {\small ADD} & 2 & 1 & Addition operation. \\
+&&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv \boldsymbol{\mu}_{\mathbf{s}}[0] + \boldsymbol{\mu}_{\mathbf{s}}[1]$ \\
+\midrule
+0x02 & {\small MUL} & 2 & 1 & Multiplication operation. \\
+&&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv \boldsymbol{\mu}_{\mathbf{s}}[0] \times \boldsymbol{\mu}_{\mathbf{s}}[1]$ \\
+\midrule
+0x03 & {\small SUB} & 2 & 1 & Subtraction operation. \\
+&&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv \boldsymbol{\mu}_{\mathbf{s}}[0] - \boldsymbol{\mu}_{\mathbf{s}}[1]$ \\
+\midrule
+0x04 & {\small DIV} & 2 & 1 & Integer division operation. \\
+&&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv \begin{cases}0 & \text{if} \quad \boldsymbol{\mu}_{\mathbf{s}}[1] = 0\\ \lfloor\boldsymbol{\mu}_{\mathbf{s}}[0] \div \boldsymbol{\mu}_{\mathbf{s}}[1]\rfloor & \text{otherwise}\end{cases}$  \\
+\midrule
+0x05 & {\small SDIV} & 2 & 1 & Signed integer division operation (truncated). \\
+&&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv \begin{cases}0 & \text{if} \> \boldsymbol{\mu}_{\mathbf{s}}[1] = 0\\ -2^{255} & \text{if} \> \boldsymbol{\mu}_{\mathbf{s}}[0] = -2^{255} \wedge \, \boldsymbol{\mu}_{\mathbf{s}}[1] = -1\\ \mathbf{sgn} (\boldsymbol{\mu}_{\mathbf{s}}[0] \div \boldsymbol{\mu}_{\mathbf{s}}[1]) \lfloor |\boldsymbol{\mu}_{\mathbf{s}}[0] \div \boldsymbol{\mu}_{\mathbf{s}}[1]| \rfloor & \text{otherwise}\end{cases}$  \\
+&&&& Where all values are treated as two's complement signed 256-bit integers. \\
+&&&& Note the overflow semantic when $-2^{255}$ is negated.\\
+\midrule
+0x06 & {\small MOD} & 2 & 1 & Modulo remainder operation. \\
+&&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv \begin{cases}0 & \text{if} \quad \boldsymbol{\mu}_{\mathbf{s}}[1] = 0\\ \boldsymbol{\mu}_{\mathbf{s}}[0] \bmod \boldsymbol{\mu}_{\mathbf{s}}[1] & \text{otherwise}\end{cases}$  \\
+\midrule
+0x07 & {\small SMOD} & 2 & 1 & Signed modulo remainder operation. \\
+&&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv \begin{cases}0 & \text{if} \quad \boldsymbol{\mu}_{\mathbf{s}}[1] = 0\\ \mathbf{sgn} (\boldsymbol{\mu}_{\mathbf{s}}[0]) (|\boldsymbol{\mu}_{\mathbf{s}}[0]| \bmod |\boldsymbol{\mu}_{\mathbf{s}}[1]|) & \text{otherwise}\end{cases}$  \\
+&&&& Where all values are treated as two's complement signed 256-bit integers. \\
+\midrule
+0x08 & {\small ADDMOD} & 3 & 1 & Modulo addition operation. \\
+&&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv \begin{cases}0 & \text{if} \quad \boldsymbol{\mu}_{\mathbf{s}}[2] = 0\\ (\boldsymbol{\mu}_{\mathbf{s}}[0] + \boldsymbol{\mu}_{\mathbf{s}}[1]) \mod \boldsymbol{\mu}_{\mathbf{s}}[2] & \text{otherwise}\end{cases}$  \\
+&&&& All intermediate calculations of this operation are not subject t
