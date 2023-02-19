@@ -1951,4 +1951,91 @@ Here given are the various exceptions to the state transition rules given in sec
 \midrule
 0x08 & {\small ADDMOD} & 3 & 1 & Modulo addition operation. \\
 &&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv \begin{cases}0 & \text{if} \quad \boldsymbol{\mu}_{\mathbf{s}}[2] = 0\\ (\boldsymbol{\mu}_{\mathbf{s}}[0] + \boldsymbol{\mu}_{\mathbf{s}}[1]) \mod \boldsymbol{\mu}_{\mathbf{s}}[2] & \text{otherwise}\end{cases}$  \\
-&&&& All intermediate calculations of this operation are not subject t
+&&&& All intermediate calculations of this operation are not subject to the $2^{256}$ \\
+&&&& modulo. \\
+\midrule
+0x09 & {\small MULMOD} & 3 & 1 & Modulo multiplication operation. \\
+&&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv \begin{cases}0 & \text{if} \quad \boldsymbol{\mu}_{\mathbf{s}}[2] = 0\\ (\boldsymbol{\mu}_{\mathbf{s}}[0] \times \boldsymbol{\mu}_{\mathbf{s}}[1]) \mod \boldsymbol{\mu}_{\mathbf{s}}[2] & \text{otherwise}\end{cases}$  \\
+&&&& All intermediate calculations of this operation are not subject to the $2^{256}$ \\
+&&&& modulo. \\
+\midrule
+0x0a & {\small EXP} & 2 & 1 & Exponential operation. \\
+&&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv \boldsymbol{\mu}_{\mathbf{s}}[0] ^ {\boldsymbol{\mu}_{\mathbf{s}}[1] }$ \\
+\midrule
+0x0b & {\small SIGNEXTEND} & 2 & 1 & Extend length of two's complement signed integer. \\
+&&&& $ \forall i \in [0..255]: \boldsymbol{\mu}'_{\mathbf{s}}[0]_{\mathrm{i}} \equiv \begin{cases} \boldsymbol{\mu}_{\mathbf{s}}[1]_{\mathrm{t}} &\text{if} \quad i \leqslant t \quad \text{where} \; t = 256 - 8(\boldsymbol{\mu}_{\mathbf{s}}[0] + 1) \\ \boldsymbol{\mu}_{\mathbf{s}}[1]_{\mathrm{i}} &\text{otherwise} \end{cases}$ \\
+\multicolumn{5}{l}{$\boldsymbol{\mu}_{\mathbf{s}}[x]_{\mathrm{i}}$ gives the $i$th bit (counting from zero) of $\boldsymbol{\mu}_{\mathbf{s}}[x]$} \vspace{5pt} \\
+\midrule
+\end{tabu}
+
+\begin{tabu}{\usetabu{opcodes}}
+\toprule
+\multicolumn{5}{c}{\textbf{10s: Comparison \& Bitwise Logic Operations}} \\
+\textbf{Value} & \textbf{Mnemonic} & $\delta$ & $\alpha$ & \textbf{Description} \vspace{5pt} \\
+0x10 & {\small LT} & 2 & 1 & Less-than comparison. \\
+&&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv \begin{cases} 1 & \text{if} \quad \boldsymbol{\mu}_{\mathbf{s}}[0] < \boldsymbol{\mu}_{\mathbf{s}}[1] \\ 0 & \text{otherwise} \end{cases}$ \\
+\midrule
+0x11 & {\small GT} & 2 & 1 & Greater-than comparison. \\
+&&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv \begin{cases} 1 & \text{if} \quad \boldsymbol{\mu}_{\mathbf{s}}[0] > \boldsymbol{\mu}_{\mathbf{s}}[1] \\ 0 & \text{otherwise} \end{cases}$ \\
+\midrule
+0x12 & {\small SLT} & 2 & 1 & Signed less-than comparison. \\
+&&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv \begin{cases} 1 & \text{if} \quad \boldsymbol{\mu}_{\mathbf{s}}[0] < \boldsymbol{\mu}_{\mathbf{s}}[1] \\ 0 & \text{otherwise} \end{cases}$ \\
+&&&& Where all values are treated as two's complement signed 256-bit integers. \\
+\midrule
+0x13 & {\small SGT} & 2 & 1 & Signed greater-than comparison. \\
+&&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv \begin{cases} 1 & \text{if} \quad \boldsymbol{\mu}_{\mathbf{s}}[0] > \boldsymbol{\mu}_{\mathbf{s}}[1] \\ 0 & \text{otherwise} \end{cases}$ \\
+&&&& Where all values are treated as two's complement signed 256-bit integers. \\
+\midrule
+0x14 & {\small EQ} & 2 & 1 & Equality comparison. \\
+&&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv \begin{cases} 1 & \text{if} \quad \boldsymbol{\mu}_{\mathbf{s}}[0] = \boldsymbol{\mu}_{\mathbf{s}}[1] \\ 0 & \text{otherwise} \end{cases}$ \\
+\midrule
+0x15 & {\small ISZERO} & 1 & 1 & Simple not operator. \\
+&&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv \begin{cases} 1 & \text{if} \quad \boldsymbol{\mu}_{\mathbf{s}}[0] = 0 \\ 0 & \text{otherwise} \end{cases}$ \\
+\midrule
+0x16 & {\small AND} & 2 & 1 & Bitwise AND operation. \\
+&&&& $\forall i \in [0..255]: \boldsymbol{\mu}'_{\mathbf{s}}[0]_{\mathrm{i}} \equiv \boldsymbol{\mu}_{\mathbf{s}}[0]_{\mathrm{i}} \wedge \boldsymbol{\mu}_{\mathbf{s}}[1]_{\mathrm{i}}$ \\
+\midrule
+0x17 & {\small OR} & 2 & 1 & Bitwise OR operation. \\
+&&&& $\forall i \in [0..255]: \boldsymbol{\mu}'_{\mathbf{s}}[0]_{\mathrm{i}} \equiv \boldsymbol{\mu}_{\mathbf{s}}[0]_{\mathrm{i}} \vee \boldsymbol{\mu}_{\mathbf{s}}[1]_{\mathrm{i}}$ \\
+\midrule
+0x18 & {\small XOR} & 2 & 1 & Bitwise XOR operation. \\
+&&&& $\forall i \in [0..255]: \boldsymbol{\mu}'_{\mathbf{s}}[0]_{\mathrm{i}} \equiv \boldsymbol{\mu}_{\mathbf{s}}[0]_{\mathrm{i}} \oplus \boldsymbol{\mu}_{\mathbf{s}}[1]_{\mathrm{i}}$ \\
+\midrule
+0x19 & {\small NOT} & 1 & 1 & Bitwise NOT operation. \\
+&&&& $\forall i \in [0..255]: \boldsymbol{\mu}'_{\mathbf{s}}[0]_{\mathrm{i}} \equiv \begin{cases} 1 & \text{if} \quad \boldsymbol{\mu}_{\mathbf{s}}[0]_{\mathrm{i}} = 0 \\ 0 & \text{otherwise} \end{cases}$ \\
+\midrule
+0x1a & {\small BYTE} & 2 & 1 & Retrieve single byte from word. \\
+&&&& $\forall i \in [0..255]: \boldsymbol{\mu}'_{\mathbf{s}}[0]_{\mathrm{i}} \equiv \begin{cases} \boldsymbol{\mu}_{\mathbf{s}}[1]_{(i + 8\boldsymbol{\mu}_{\mathbf{s}}[0])} & \text{if} \quad i < 8 \wedge \boldsymbol{\mu}_{\mathbf{s}}[0] < 32 \\ 0 & \text{otherwise} \end{cases} $\\
+&&&& For the Nth byte, we count from the left (i.e. N=0 would be the most significant\\
+&&&& in big endian). \\
+\bottomrule
+\end{tabu}
+
+\begin{tabu}{\usetabu{opcodes}}
+\toprule
+\multicolumn{5}{c}{\textbf{20s: SHA3}} \vspace{5pt} \\
+\textbf{Value} & \textbf{Mnemonic} & $\delta$ & $\alpha$ & \textbf{Description} \vspace{5pt} \\
+0x20 & {\small SHA3} & 2 & 1 & Compute Keccak-256 hash. \\
+&&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv \mathtt{Keccak}(\boldsymbol{\mu}_{\mathbf{m}}[ \boldsymbol{\mu}_{\mathbf{s}}[0] \dots (\boldsymbol{\mu}_{\mathbf{s}}[0] + \boldsymbol{\mu}_{\mathbf{s}}[1] - 1) ])$ \\
+&&&& $\boldsymbol{\mu}'_{\mathrm{i}} \equiv M(\boldsymbol{\mu}_{\mathrm{i}}, \boldsymbol{\mu}_{\mathbf{s}}[0], \boldsymbol{\mu}_{\mathbf{s}}[1])$ \\
+\bottomrule
+\end{tabu}
+
+\begin{tabu}{\usetabu{opcodes}}
+\toprule
+\multicolumn{5}{c}{\textbf{30s: Environmental Information}} \vspace{5pt} \\
+\textbf{Value} & \textbf{Mnemonic} & $\delta$ & $\alpha$ & \textbf{Description} \vspace{5pt} \\
+0x30 & {\small ADDRESS} & 0 & 1 & Get address of currently executing account. \\
+&&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv I_{\mathrm{a}}$ \\
+\midrule
+0x31 & {\small BALANCE} & 1 & 1 & Get balance of the given account. \\
+&&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv \begin{cases}\boldsymbol{\sigma}[\boldsymbol{\mu}_{\mathbf{s}}[0]]_{\mathrm{b}}& \text{if} \quad \boldsymbol{\sigma}[\boldsymbol{\mu}_{\mathbf{s}}[0] \mod 2^{160}] \neq \varnothing\\0&\text{otherwise}\end{cases}$ \\
+\midrule
+0x32 & {\small ORIGIN} & 0 & 1 & Get execution origination address. \\
+&&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv I_{\mathrm{o}}$ \\
+&&&& This is the sender of original transaction; it is never an account with\\
+&&&& non-empty associated code. \\
+\midrule
+0x33 & {\small CALLER} & 0 & 1 & Get caller address. \\
+&&&& $\boldsymbol{\mu}'_{\mathbf{s}}[0] \equiv I_{\mathrm{s}}$ \\
+&&&& This 
